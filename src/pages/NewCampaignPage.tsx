@@ -4,6 +4,7 @@ import { createCampaign, createBrand, listBrands, listExecutors, uploadBrandLogo
 import { LocationMap, type LatLng } from '../components/LocationMap'
 import type { Brand, ServiceType, User } from '../types'
 import { DETAIL_FORM, PHOTOS_REQUIRED, SERVICE_TYPES } from '../types'
+import { mediaUrl } from '../utils/mediaUrl'
 import { useUI } from '../ui'
 
 const DEFAULT_RADIUS_KM = 3
@@ -169,7 +170,7 @@ export function NewCampaignPage() {
           {brandId && brands.find((b) => b.id === brandId)?.image && (
             <img
               className="brand-logo-preview"
-              src={brands.find((b) => b.id === brandId)!.image!}
+              src={mediaUrl(brands.find((b) => b.id === brandId)!.image!)}
               alt=""
             />
           )}

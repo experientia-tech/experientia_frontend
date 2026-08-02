@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import type { ProofImage } from '../types'
 import { formatCoords, formatDateTime, slotLabel } from '../types'
+import { mediaUrl } from '../utils/mediaUrl'
 import { LocationMap } from './LocationMap'
 
 interface ProofThumbGridProps {
@@ -44,7 +45,7 @@ export const ProofThumbGrid = memo(function ProofThumbGrid({
               onClick={() => interactive && onSelect?.(img.slot)}
               disabled={!interactive}
             >
-              <img src={img.url} alt={slotLabel(img.slot)} loading="lazy" decoding="async" />
+              <img src={mediaUrl(img.url)} alt={slotLabel(img.slot)} loading="lazy" decoding="async" />
             </button>
             <figcaption>
               <strong>{slotLabel(img.slot)}</strong>

@@ -6,6 +6,7 @@ import { useCampaignSearch } from '../campaignSearch'
 import { GlobalLoaderInline } from '../components/GlobalLoader'
 import type { CampaignListItem } from '../types'
 import { STATUS_LABELS, formatDate } from '../types'
+import { mediaUrl } from '../utils/mediaUrl'
 
 export function DashboardPage() {
   const { user } = useAuth()
@@ -129,7 +130,7 @@ export function DashboardPage() {
                     {c.logo || c.brand?.image ? (
                       <img
                         className="brand-logo-sm"
-                        src={c.logo || c.brand?.image || ''}
+                        src={mediaUrl(c.logo || c.brand?.image || '')}
                         alt=""
                         loading="lazy"
                       />

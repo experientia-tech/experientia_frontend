@@ -7,6 +7,7 @@ import { CampaignTeamModal, type TeamPanelKind } from '../components/CampaignTea
 import { GlobalLoaderInline } from '../components/GlobalLoader'
 import type { Campaign, Task } from '../types'
 import { STATUS_LABELS, formatDate, taskLabel, taskProofCount } from '../types'
+import { mediaUrl } from '../utils/mediaUrl'
 import { useUI } from '../ui'
 
 const TaskClusterMap = lazy(() =>
@@ -246,7 +247,7 @@ export function CampaignDetailPage() {
           {campaign.logo || campaign.brand?.image ? (
             <img
               className="campaign-thumb"
-              src={campaign.logo || campaign.brand?.image || ''}
+              src={mediaUrl(campaign.logo || campaign.brand?.image || '')}
               alt=""
             />
           ) : (
@@ -612,7 +613,7 @@ export function CampaignDetailPage() {
                     {task.proof_images[0] && (
                       <div className="task-thumb-wrap">
                         <img
-                          src={task.proof_images[0].url}
+                          src={mediaUrl(task.proof_images[0].url)}
                           alt=""
                           loading="lazy"
                           decoding="async"
@@ -708,7 +709,7 @@ function PartnerTile({
     <div className="partner-tile">
       <div className="partner-tile-main">
         {image ? (
-          <img className="brand-logo-sm" src={image} alt="" />
+          <img className="brand-logo-sm" src={mediaUrl(image)} alt="" />
         ) : (
           <span className="brand-logo-sm placeholder">{label.charAt(0)}</span>
         )}

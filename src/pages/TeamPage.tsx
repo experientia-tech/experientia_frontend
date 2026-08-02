@@ -9,6 +9,7 @@ import {
   type TeamMember,
 } from '../api'
 import type { Brand } from '../types'
+import { mediaUrl } from '../utils/mediaUrl'
 import { useUI } from '../ui'
 import {
   isValidName,
@@ -267,7 +268,7 @@ export function TeamPage() {
                 brands.map((b) => (
                   <article key={b.id} className="brand-card">
                     {b.image ? (
-                      <img className="brand-logo" src={b.image} alt={b.name} loading="lazy" />
+                      <img className="brand-logo" src={mediaUrl(b.image)} alt={b.name} loading="lazy" />
                     ) : (
                       <div className="brand-logo placeholder">{b.name.charAt(0)}</div>
                     )}
@@ -447,7 +448,7 @@ function PeopleTable({
                     <td>
                       <span className="brand-inline">
                         {brand?.image && (
-                          <img src={brand.image} alt="" className="brand-logo-sm" />
+                          <img src={mediaUrl(brand.image)} alt="" className="brand-logo-sm" />
                         )}
                         {m.brand_name || brand?.name || '—'}
                       </span>

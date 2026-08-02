@@ -15,6 +15,7 @@ import type { Campaign, ProofImage, Task } from '../types'
 import { CAPTURE_SLOTS, DETAIL_FORM, STATUS_LABELS, canExecutorOpenTask, formatCoords, formatDate, formatDateTime, slotLabel, taskLabel } from '../types'
 import type { ServiceType } from '../types'
 import { enqueueProofUpload, flushProofUploads } from '../utils/proofUploadQueue'
+import { mediaUrl } from '../utils/mediaUrl'
 import { isValidName, isValidPhone, sanitizeNameInput, sanitizePhoneInput } from '../utils/validation'
 import { useUI } from '../ui'
 
@@ -548,7 +549,7 @@ export function TaskDetailPage() {
       {previewImage && previewSlot && (
         <div className="proof-preview-backdrop" onClick={() => setPreviewSlot(null)}>
           <div className="proof-preview-panel" onClick={(e) => e.stopPropagation()}>
-            <img src={previewImage.url} alt={slotLabel(previewSlot)} />
+            <img src={mediaUrl(previewImage.url)} alt={slotLabel(previewSlot)} />
             <div className="proof-preview-meta">
               <span className="muted">{slotLabel(previewSlot)}</span>
               {previewImage.captured_at && (

@@ -716,6 +716,17 @@ export function TaskDetailPage() {
                             }}
                           />
                         </label>
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={openingCamera}
+                          onClick={() => {
+                            setPendingSlot(slot)
+                            void openCamera(slot)
+                          }}
+                        >
+                          Camera
+                        </button>
                         {has && (
                           <button
                             type="button"

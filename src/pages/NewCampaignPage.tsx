@@ -5,8 +5,6 @@ import { LocationMap, type LatLng } from '../components/LocationMap'
 import type { Brand, ServiceType, User } from '../types'
 import { DETAIL_FORM, PHOTOS_REQUIRED, SERVICE_TYPES } from '../types'
 import { mediaUrl } from '../utils/mediaUrl'
-import { lookupIndianPincode } from '../utils/geocode'
-import { parseApiError } from '../utils/apiError'
 import { useUI } from '../ui'
 
 const DEFAULT_RADIUS_KM = 3
@@ -17,17 +15,9 @@ function parseCoord(value: string, min: number, max: number): number | null {
   return n
 }
 
-function withPincode(address: string, pincode: string) {
-  const pin = pincode.trim()
-  const base = address.trim()
-  if (!pin) return base || undefined
-  if (base.includes(pin)) return base
-  return base ? `${base}, ${pin}` : pin
-}
-
 export function NewCampaignPage() {
   const navigate = useNavigate()
-  const { showError, showSuccess } = useUI()
+  const { showError } = useUI()
   const [brands, setBrands] = useState<Brand[]>([])
   const [executors, setExecutors] = useState<User[]>([])
   const [name, setName] = useState('')
@@ -37,16 +27,15 @@ export function NewCampaignPage() {
   const [serviceType, setServiceType] = useState<ServiceType>('Pole Boards')
   const [description, setDescription] = useState('')
   const [address, setAddress] = useState('')
-  const [pincode, setPincode] = useState('')
   const [center, setCenter] = useState<LatLng | null>(null)
   const [latInput, setLatInput] = useState('')
   const [lngInput, setLngInput] = useState('')
+  const [radiusKm, setRadiusKm] = useState(String(DEFAULT_RADIUS_KM))
   const [totalTasks, setTotalTasks] = useState(100)
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [selectedExecs, setSelectedExecs] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
-  const [lookingUpPin, setLookingUpPin] = useState(false)
 
   const photosNeeded = PHOTOS_REQUIRED[serviceType]
   const formHint =
@@ -55,6 +44,10 @@ export function NewCampaignPage() {
       : DETAIL_FORM[serviceType] === 'gym'
         ? 'Then gym details'
         : 'No extra form'
+
+  const radiusValue = Number(radiusKm)
+  const radiusForMap =
+    Number.isFinite(radiusValue) && radiusValue > 0 ? radiusValue : DEFAULT_RADIUS_KM
 
   useEffect(() => {
     listBrands().then((b) => {
@@ -80,24 +73,6 @@ export function NewCampaignPage() {
     applyCenter({ lat, lng })
   }
 
-  const applyPincode = async () => {
-    setLookingUpPin(true)
-    try {
-      const result = await lookupIndianPincode(pincode)
-      applyCenter({ lat: result.lat, lng: result.lng })
-      setPincode(result.pincode || pincode.trim())
-      if (!address.trim()) setAddress(result.label)
-      else if (!address.includes(result.pincode || pincode.trim())) {
-        setAddress((prev) => withPincode(prev, result.pincode || pincode) || prev)
-      }
-      showSuccess(`Mapped pincode ${result.pincode || pincode} on the map`)
-    } catch (error) {
-      showError(parseApiError(error, 'Could not find that pincode'))
-    } finally {
-      setLookingUpPin(false)
-    }
-  }
-
   const addBrand = async () => {
     if (!newBrand.trim()) return
     if (!/^[A-Za-z][A-Za-z\s'.-]*$/.test(newBrand.trim())) {
@@ -114,7 +89,6 @@ export function NewCampaignPage() {
       setBrandId(b.id)
       setNewBrand('')
       setNewBrandLogo(null)
-      showSuccess('Brand added')
     } catch {
       // API errors shown globally
     }
@@ -138,11 +112,12 @@ export function NewCampaignPage() {
       return
     }
     if (!resolved) {
-      showError('Set a location via pincode, map pin, or lat/lng')
+      showError('Set latitude and longitude, or click the map to place the center pin')
       return
     }
-    if (pincode.trim() && !/^\d{6}$/.test(pincode.trim())) {
-      showError('Pincode must be a 6-digit Indian PIN')
+    const radius = Number(radiusKm)
+    if (!Number.isFinite(radius) || radius <= 0 || radius > 500) {
+      showError('Geofence radius must be between 0.1 and 500 km')
       return
     }
     if (startDate && endDate && endDate < startDate) {
@@ -156,9 +131,10 @@ export function NewCampaignPage() {
         brand_id: brandId || null,
         service_type: serviceType,
         description: description.trim() || undefined,
-        address: withPincode(address, pincode),
+        address: address.trim() || undefined,
         center_latitude: resolved.lat,
         center_longitude: resolved.lng,
+        radius_km: radius,
         total_tasks: totalTasks,
         executor_ids: selectedExecs,
         start_date: startDate || null,
@@ -178,8 +154,8 @@ export function NewCampaignPage() {
         <div>
           <h1>New campaign</h1>
           <p className="muted">
-            Set the campaign center with a pincode or map pin. Executors must capture photos within{' '}
-            {DEFAULT_RADIUS_KM} km of that point.
+            Set the campaign center with latitude/longitude or a map pin. Executors must capture
+            photos within your chosen geofence radius.
           </p>
         </div>
       </div>
@@ -246,9 +222,21 @@ export function NewCampaignPage() {
             <p>
               {photosNeeded} photo{photosNeeded === 1 ? '' : 's'}
               {serviceType === 'Auto Hood' ? ' — front → side → back' : ''}. {formHint}. Must be
-              within {DEFAULT_RADIUS_KM} km of the campaign pin.
+              within {radiusForMap} km of the campaign center.
             </p>
           </div>
+          <label>
+            Geofence radius (km)
+            <input
+              type="number"
+              min={0.1}
+              max={500}
+              step={0.1}
+              value={radiusKm}
+              onChange={(e) => setRadiusKm(e.target.value)}
+              required
+            />
+          </label>
           <label>
             Number of tasks
             <input
@@ -321,53 +309,34 @@ export function NewCampaignPage() {
         <section className="panel stack">
           <h3>Campaign location</h3>
           <p className="muted small">
-            Enter a 6-digit pincode or click the map to place the center pin. The green circle is the{' '}
-            {DEFAULT_RADIUS_KM} km zone where executors can upload proofs.
+            Enter latitude and longitude or click the map. The green circle shows the{' '}
+            {radiusForMap} km capture zone.
           </p>
-          <div className="coord-row pincode-row">
-            <label>
-              Pincode
-              <input
-                value={pincode}
-                inputMode="numeric"
-                maxLength={6}
-                placeholder="e.g. 560001"
-                onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              />
-            </label>
-            <button
-              type="button"
-              className="btn secondary coord-go"
-              disabled={lookingUpPin || pincode.trim().length !== 6}
-              onClick={() => void applyPincode()}
-            >
-              {lookingUpPin ? 'Finding…' : 'Find on map'}
-            </button>
-          </div>
           <div className="coord-row">
             <label>
               Latitude
-              <input value={latInput} onChange={(e) => setLatInput(e.target.value)} />
+              <input value={latInput} onChange={(e) => setLatInput(e.target.value)} required />
             </label>
             <label>
               Longitude
-              <input value={lngInput} onChange={(e) => setLngInput(e.target.value)} />
+              <input value={lngInput} onChange={(e) => setLngInput(e.target.value)} required />
             </label>
-            <button type="button" className="btn ghost coord-go" onClick={applyCoordinates}>
+            <button type="button" className="btn secondary coord-go" onClick={applyCoordinates}>
               Set on map
             </button>
           </div>
           {center && (
             <p className="geo-status ok">
-              Pin set · {center.lat.toFixed(5)}, {center.lng.toFixed(5)} · {DEFAULT_RADIUS_KM} km
-              capture radius
+              Pin set · {center.lat.toFixed(5)}, {center.lng.toFixed(5)} · {radiusForMap} km radius
             </p>
           )}
-          {!center && <p className="geo-status warn">No location yet — use pincode or tap the map</p>}
+          {!center && (
+            <p className="geo-status warn">No pin yet — enter coordinates or tap the map</p>
+          )}
           <LocationMap
             value={center}
             onChange={applyCenter}
-            radiusKm={DEFAULT_RADIUS_KM}
+            radiusKm={radiusForMap}
             height={420}
             zoom={5}
             center={{ lat: 20.5937, lng: 78.9629 }}

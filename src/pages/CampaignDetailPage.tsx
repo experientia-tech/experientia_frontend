@@ -4,6 +4,7 @@ import { deleteCampaign, getCampaign } from '../api'
 import { useAuth } from '../auth'
 import { useExportQueueOptional } from '../exportQueue'
 import { CampaignEditModal } from '../components/CampaignEditModal'
+import { AddCampaignTasksModal } from '../components/AddCampaignTasksModal'
 import { CampaignTeamModal, type TeamPanelKind } from '../components/CampaignTeamModal'
 import { GlobalLoaderInline } from '../components/GlobalLoader'
 import type { Campaign, Task } from '../types'
@@ -38,6 +39,7 @@ export function CampaignDetailPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const [teamPanel, setTeamPanel] = useState<TeamPanelKind | null>(null)
   const [editOpen, setEditOpen] = useState(false)
+  const [addTasksOpen, setAddTasksOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -530,6 +532,11 @@ export function CampaignDetailPage() {
 
       <section className="panel">
         <div className="task-toolbar">
+          {isManager && (
+            <button type="button" className="btn primary" onClick={() => setAddTasksOpen(true)}>
+              + Add tasks
+            </button>
+          )}
           <div className="view-toggle">
             <button
               type="button"
@@ -734,6 +741,16 @@ export function CampaignDetailPage() {
           campaign={campaign}
           onClose={() => setEditOpen(false)}
           onSaved={(updated) => {
+            setCampaign((prev) => (prev ? { ...prev, ...updated, tasks: prev.tasks } : updated))
+            void load()
+          }}
+        />
+      )}
+      {addTasksOpen && (
+        <AddCampaignTasksModal
+          campaign={campaign}
+          onClose={() => setAddTasksOpen(false)}
+          onAdded={(updated) => {
             setCampaign((prev) => (prev ? { ...prev, ...updated, tasks: prev.tasks } : updated))
             void load()
           }}

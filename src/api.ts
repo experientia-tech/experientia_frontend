@@ -117,6 +117,7 @@ export async function createCampaign(payload: {
   address?: string
   center_latitude: number
   center_longitude: number
+  radius_km?: number
   total_tasks: number
   executor_ids?: string[]
   start_date?: string | null
@@ -136,11 +137,20 @@ export async function updateCampaign(
     brand_id: string | null
     center_latitude: number
     center_longitude: number
+    radius_km: number
     start_date: string | null
     end_date: string | null
   }>
 ) {
   const { data } = await api.patch<Campaign>(`/campaigns/${id}`, payload)
+  return data
+}
+
+export async function addCampaignTasks(
+  id: string,
+  payload: { count?: number; executor_user_id?: string }
+) {
+  const { data } = await api.post<Campaign>(`/campaigns/${id}/tasks`, payload)
   return data
 }
 

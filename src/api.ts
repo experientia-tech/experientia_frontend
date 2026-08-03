@@ -134,10 +134,18 @@ export async function updateCampaign(
     status: string
     address: string
     brand_id: string | null
+    center_latitude: number
+    center_longitude: number
+    start_date: string | null
+    end_date: string | null
   }>
 ) {
   const { data } = await api.patch<Campaign>(`/campaigns/${id}`, payload)
   return data
+}
+
+export async function deleteCampaign(id: string) {
+  await api.delete(`/campaigns/${id}`)
 }
 
 export async function assignCampaignSupervisors(id: string, supervisor_ids: string[]) {

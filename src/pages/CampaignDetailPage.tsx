@@ -1,8 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { getCampaign } from '../api'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { deleteCampaign, getCampaign } from '../api'
 import { useAuth } from '../auth'
 import { useExportQueueOptional } from '../exportQueue'
+import { CampaignEditModal } from '../components/CampaignEditModal'
 import { CampaignTeamModal, type TeamPanelKind } from '../components/CampaignTeamModal'
 import { GlobalLoaderInline } from '../components/GlobalLoader'
 import type { Campaign, Task } from '../types'
@@ -19,6 +20,7 @@ type ViewMode = 'card' | 'location'
 export function CampaignDetailPage() {
   const { id } = useParams()
   const campaignId = id!
+  const navigate = useNavigate()
   const { user } = useAuth()
   const isManager = user?.role === 'manager'
   const isSupervisor = user?.role === 'supervisor'
@@ -32,9 +34,11 @@ export function CampaignDetailPage() {
     refresh: async () => undefined,
   }
 
-  const { showSuccess } = useUI()
+  const { showSuccess, showError } = useUI()
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const [teamPanel, setTeamPanel] = useState<TeamPanelKind | null>(null)
+  const [editOpen, setEditOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
   const [loading, setLoading] = useState(true)
 
@@ -185,6 +189,24 @@ export function CampaignDetailPage() {
     }
   }
 
+  const onDeleteCampaign = async () => {
+    if (!campaign) return
+    const ok = window.confirm(
+      `Delete campaign “${campaign.name}”? This permanently removes the campaign and all of its tasks/proofs.`
+    )
+    if (!ok) return
+    setDeleting(true)
+    try {
+      await deleteCampaign(campaign.id)
+      showSuccess('Campaign deleted')
+      navigate('/')
+    } catch {
+      showError('Could not delete campaign')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const openTeamPanel = (kind: TeamPanelKind) => {
     if (!isManager) return
     setTeamPanel(kind)
@@ -270,24 +292,43 @@ export function CampaignDetailPage() {
             )}
           </div>
         </div>
-        {canExport && (
+        {(canExport || isManager) && (
           <div className="actions export-actions">
-            <button
-              className="btn danger"
-              type="button"
-              disabled={exportBusy || total === 0}
-              onClick={() => void onExportPdf()}
-            >
-              {exportBusy ? 'Queueing…' : 'Export to PDF'}
-            </button>
-            {exportJob?.download_ready && (
-              <button className="btn primary" type="button" onClick={() => void onDownloadExport()}>
-                Download {exportJob.filename?.endsWith('.zip') ? 'ZIP' : 'PDF'}
-              </button>
+            {isManager && (
+              <>
+                <button className="btn ghost" type="button" onClick={() => setEditOpen(true)}>
+                  Edit campaign
+                </button>
+                <button
+                  className="btn danger"
+                  type="button"
+                  disabled={deleting}
+                  onClick={() => void onDeleteCampaign()}
+                >
+                  {deleting ? 'Deleting…' : 'Delete'}
+                </button>
+              </>
             )}
-            <Link className="btn ghost" to="/downloads">
-              Open Downloads
-            </Link>
+            {canExport && (
+              <>
+                <button
+                  className="btn primary"
+                  type="button"
+                  disabled={exportBusy || total === 0}
+                  onClick={() => void onExportPdf()}
+                >
+                  {exportBusy ? 'Queueing…' : 'Export to PDF'}
+                </button>
+                {exportJob?.download_ready && (
+                  <button className="btn primary" type="button" onClick={() => void onDownloadExport()}>
+                    Download {exportJob.filename?.endsWith('.zip') ? 'ZIP' : 'PDF'}
+                  </button>
+                )}
+                <Link className="btn ghost" to="/downloads">
+                  Open Downloads
+                </Link>
+              </>
+            )}
           </div>
         )}
       </section>
@@ -686,6 +727,16 @@ export function CampaignDetailPage() {
           campaign={campaign}
           onClose={() => setTeamPanel(null)}
           onSaved={load}
+        />
+      )}
+      {editOpen && (
+        <CampaignEditModal
+          campaign={campaign}
+          onClose={() => setEditOpen(false)}
+          onSaved={(updated) => {
+            setCampaign((prev) => (prev ? { ...prev, ...updated, tasks: prev.tasks } : updated))
+            void load()
+          }}
         />
       )}
     </div>

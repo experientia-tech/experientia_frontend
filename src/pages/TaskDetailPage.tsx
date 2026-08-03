@@ -37,9 +37,14 @@ export function TaskDetailPage() {
   const [cameraDismissed, setCameraDismissed] = useState(false)
   const [previewSlot, setPreviewSlot] = useState<string | null>(null)
   const [previewMapOpen, setPreviewMapOpen] = useState(false)
+  const [pendingSlot, setPendingSlot] = useState<string | null>(null)
   const localUrls = useRef<string[]>([])
   const isSupervisor = user?.role === 'supervisor'
-  const canCapture = user?.role === 'executor'
+  const isManager = user?.role === 'manager'
+  const isExecutor = user?.role === 'executor'
+  const canCapture = isExecutor
+  const canManageProofs = isExecutor || isManager
+
 
   const syncTaskQuiet = useCallback(async () => {
     await flushProofUploads()
@@ -123,15 +128,21 @@ export function TaskDetailPage() {
     }
   }, [task?.latitude, task?.longitude, campaign?.center_latitude, campaign?.center_longitude])
 
-  const onCaptureFile = useCallback(
-    (file: File) => {
-      if (!task) return
-      const slot = slots.find((s) => !task.proof_images.some((p) => p.slot === s))
-      if (!slot) return
+  const hasUsableCoords = useCallback(() => {
+    const c = coords()
+    return Number.isFinite(c.lat) && Number.isFinite(c.lng) && !(c.lat === 0 && c.lng === 0)
+  }, [coords])
 
+  const uploadFileToSlot = useCallback(
+    (file: File, slot: string) => {
+      if (!task) return
+      if (!hasUsableCoords() && isExecutor) {
+        showError('Waiting for GPS — move outdoors or try again')
+        return
+      }
+      const { lat, lng } = coords()
       const localUrl = URL.createObjectURL(file)
       localUrls.current.push(localUrl)
-      const { lat, lng } = coords()
       const optimistic: ProofImage = {
         url: localUrl,
         slot,
@@ -172,12 +183,28 @@ export function TaskDetailPage() {
         },
       })
     },
-    [task, slots, coords, taskId]
+    [task, coords, hasUsableCoords, isExecutor, showError, taskId]
+  )
+
+  const onCaptureFile = useCallback(
+    (file: File) => {
+      const slot =
+        pendingSlot ||
+        (previewSlot && canManageProofs ? previewSlot : null) ||
+        slots.find((s) => !task?.proof_images.some((p) => p.slot === s))
+      if (!slot) return
+      setPreviewSlot(null)
+      setPendingSlot(null)
+      setCameraOpen(false)
+      uploadFileToSlot(file, slot)
+    },
+    [pendingSlot, previewSlot, canManageProofs, slots, task, uploadFileToSlot]
   )
 
   const handleCameraClose = useCallback(() => {
     setCameraOpen(false)
     setCameraDismissed(true)
+    setPendingSlot(null)
     void syncTaskQuiet()
   }, [syncTaskQuiet])
 
@@ -198,17 +225,28 @@ export function TaskDetailPage() {
     (slot: string) => {
       setPreviewSlot(null)
       setCameraDismissed(false)
+      setPendingSlot(slot)
       startTransition(() => {
         setTask((prev) =>
           prev ? { ...prev, proof_images: prev.proof_images.filter((p) => p.slot !== slot) } : prev
         )
       })
       void deleteTaskProof(taskId, slot)
-        .then(() => setCameraOpen(true))
+        .then(() => {
+          if (isExecutor) setCameraOpen(true)
+        })
         .catch(() => syncTaskQuiet())
     },
-    [taskId, syncTaskQuiet]
+    [taskId, syncTaskQuiet, isExecutor]
   )
+
+  const startUploadForSlot = (slot: string) => {
+    setPendingSlot(slot)
+    if (isExecutor) {
+      setCameraDismissed(false)
+      setCameraOpen(true)
+    }
+  }
 
   const onSubmitDetails = async (e: FormEvent) => {
     e.preventDefault()
@@ -528,9 +566,77 @@ export function TaskDetailPage() {
           )}
 
           <h3>Proof photos</h3>
+          {canManageProofs && (
+            <div className="manager-proof-tools stack">
+              <p className="muted">
+                {isManager
+                  ? 'Add or replace photos for any required slot. Geofence checks are skipped for managers.'
+                  : 'Capture photos in order using the camera.'}
+              </p>
+              <div className="manager-slot-list">
+                {slots.map((slot) => {
+                  const has = uploadedSlots.has(slot)
+                  return (
+                    <div key={slot} className="manager-slot-row">
+                      <div>
+                        <strong>{slotLabel(slot)}</strong>
+                        <span className={`chip ${has ? 'ok' : 'warn'}`}>
+                          {has ? 'Uploaded' : 'Missing'}
+                        </span>
+                      </div>
+                      <div className="actions">
+                        {isManager && (
+                          <label className="btn ghost file-btn">
+                            {has ? 'Replace file' : 'Upload file'}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              hidden
+                              onChange={(e) => {
+                                const file = e.target.files?.[0]
+                                e.target.value = ''
+                                if (file) uploadFileToSlot(file, slot)
+                              }}
+                            />
+                          </label>
+                        )}
+                        {isExecutor && !has && (
+                          <button
+                            type="button"
+                            className="btn primary"
+                            onClick={() => startUploadForSlot(slot)}
+                          >
+                            Capture
+                          </button>
+                        )}
+                        {isExecutor && has && (
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            onClick={() => onRetakeProof(slot)}
+                          >
+                            Retake
+                          </button>
+                        )}
+                        {has && (
+                          <button
+                            type="button"
+                            className="btn danger"
+                            onClick={() => onDeleteProof(slot)}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
           <ProofThumbGrid
             images={task.proof_images}
-            interactive={canCapture}
+            interactive={canManageProofs || isSupervisor}
             onSelect={setPreviewSlot}
             fallbackLatitude={task.latitude}
             fallbackLongitude={task.longitude}
@@ -538,9 +644,9 @@ export function TaskDetailPage() {
         </section>
       </div>
 
-      {cameraOpen && captureSlot && (
+      {cameraOpen && (pendingSlot || captureSlot) && (
         <CameraCapture
-          label={slotLabel(captureSlot)}
+          label={slotLabel(pendingSlot || captureSlot!)}
           onClose={handleCameraClose}
           onCapture={onCaptureFile}
         />
@@ -586,14 +692,38 @@ export function TaskDetailPage() {
               </div>
             )}
             <div className="proof-preview-actions">
-              <button type="button" className="btn primary" onClick={() => onRetakeProof(previewSlot)}>
-                Retake
-              </button>
-              <button type="button" className="btn danger" onClick={() => onDeleteProof(previewSlot)}>
-                Delete
-              </button>
+              {canManageProofs && (
+                <>
+                  {isManager && (
+                    <label className="btn primary file-btn">
+                      Replace file
+                      <input
+                        type="file"
+                        accept="image/*"
+                        hidden
+                        onChange={(e) => {
+                          const file = e.target.files?.[0]
+                          e.target.value = ''
+                          if (file && previewSlot) {
+                            setPreviewSlot(null)
+                            uploadFileToSlot(file, previewSlot)
+                          }
+                        }}
+                      />
+                    </label>
+                  )}
+                  {isExecutor && (
+                    <button type="button" className="btn primary" onClick={() => onRetakeProof(previewSlot)}>
+                      Retake
+                    </button>
+                  )}
+                  <button type="button" className="btn danger" onClick={() => onDeleteProof(previewSlot)}>
+                    Delete
+                  </button>
+                </>
+              )}
               <button type="button" className="btn ghost" onClick={() => setPreviewSlot(null)}>
-                Cancel
+                Close
               </button>
             </div>
           </div>

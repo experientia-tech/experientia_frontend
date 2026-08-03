@@ -148,7 +148,7 @@ export async function updateCampaign(
 
 export async function addCampaignTasks(
   id: string,
-  payload: { count?: number; executor_user_id?: string }
+  payload: { count?: number; executor_user_id?: string; manager_owned?: boolean }
 ) {
   const { data } = await api.post<{ campaign: Campaign; task_ids: string[] }>(
     `/campaigns/${id}/tasks`,

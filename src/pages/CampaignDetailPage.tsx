@@ -228,6 +228,25 @@ export function CampaignDetailPage() {
     })
   }, [campaign, memberQuery, roleFilter])
 
+  const taskAssigneeOptions = useMemo(() => {
+    if (!campaign) return []
+    const seen = new Set<string>()
+    const out: typeof campaign.executors = []
+    for (const u of campaign.task_assignees || []) {
+      if (!seen.has(u.id)) {
+        seen.add(u.id)
+        out.push(u)
+      }
+    }
+    for (const u of campaign.executors) {
+      if (!seen.has(u.id)) {
+        seen.add(u.id)
+        out.push(u)
+      }
+    }
+    return out
+  }, [campaign])
+
   const center = useMemo(() => {
     if (campaign?.center_latitude != null && campaign?.center_longitude != null) {
       return { lat: campaign.center_latitude, lng: campaign.center_longitude }
@@ -560,10 +579,11 @@ export function CampaignDetailPage() {
             onChange={(e) => setTaskQuery(e.target.value)}
           />
           <select value={executorFilter} onChange={(e) => setExecutorFilter(e.target.value)}>
-            <option value="">All Executors</option>
-            {campaign.executors.map((e) => (
+            <option value="">All assignees</option>
+            {taskAssigneeOptions.map((e) => (
               <option key={e.id} value={e.id}>
                 {e.full_name}
+                {e.role === 'manager' ? ' (manager)' : ''}
               </option>
             ))}
           </select>

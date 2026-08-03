@@ -16,6 +16,7 @@ import {
   sanitizeNameInput,
   sanitizePhoneInput,
 } from '../utils/validation'
+import { useAuth } from '../auth'
 import { useUI } from '../ui'
 
 interface AddCampaignTasksModalProps {
@@ -31,11 +32,10 @@ export function AddCampaignTasksModal({
   onClose,
   onAdded,
 }: AddCampaignTasksModalProps) {
+  const { user } = useAuth()
   const { showError, showSuccess } = useUI()
   const [mode, setMode] = useState<Mode>('complete')
-  const [executorId, setExecutorId] = useState(
-    campaign.executors[0]?.id || ''
-  )
+  const [executorId, setExecutorId] = useState(campaign.executors[0]?.id || '')
   const [emptyCount, setEmptyCount] = useState(1)
   const [slotFiles, setSlotFiles] = useState<Record<string, File>>({})
   const [slotPreviews, setSlotPreviews] = useState<Record<string, string>>({})
@@ -150,10 +150,6 @@ export function AddCampaignTasksModal({
 
   const onSubmitComplete = async (e: FormEvent) => {
     e.preventDefault()
-    if (!executorId) {
-      showError('Select an executor for this task')
-      return
-    }
     if (!hasCoords) {
       showError('Campaign needs a map center before adding tasks')
       return
@@ -190,7 +186,7 @@ export function AddCampaignTasksModal({
     try {
       const { campaign: updated, task_ids } = await addCampaignTasks(campaign.id, {
         count: 1,
-        executor_user_id: executorId,
+        manager_owned: true,
       })
       const taskId = task_ids[0]
       if (!taskId) throw new Error('Task was not created')
@@ -256,27 +252,35 @@ export function AddCampaignTasksModal({
               </button>
             </div>
 
-            <label className="form-field">
-              Assign to executor
-              <select
-                value={executorId}
-                onChange={(e) => setExecutorId(e.target.value)}
-                required
-              >
-                <option value="">Select executor</option>
-                {campaign.executors.map((ex) => (
-                  <option key={ex.id} value={ex.id}>
-                    {ex.full_name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {mode === 'empty' && (
+              <label className="form-field">
+                Assign to executor
+                <select
+                  value={executorId}
+                  onChange={(e) => setExecutorId(e.target.value)}
+                  required
+                >
+                  <option value="">Distribute among executors</option>
+                  {campaign.executors.map((ex) => (
+                    <option key={ex.id} value={ex.id}>
+                      {ex.full_name}
+                    </option>
+                  ))}
+                </select>
+                {campaign.executors.length === 0 && (
+                  <span className="muted small">
+                    Assign executors to this campaign before adding empty tasks.
+                  </span>
+                )}
+              </label>
+            )}
 
             {mode === 'complete' ? (
               <form className="stack" onSubmit={(e) => void onSubmitComplete(e)}>
                 <p className="muted">
-                  Upload proof photos and details as the campaign manager. Geofence checks are
-                  skipped — use camera, gallery, or file upload for each slot.
+                  Upload proof photos and details as the campaign manager. This task will be owned
+                  by you ({user?.full_name || 'campaign manager'}) — no executor is required.
+                  Geofence checks are skipped — use camera, gallery, or file upload for each slot.
                 </p>
 
                 <div className="manager-slot-list add-task-slots">
@@ -422,7 +426,7 @@ export function AddCampaignTasksModal({
                   <button
                     type="button"
                     className="btn primary"
-                    disabled={busy}
+                    disabled={busy || campaign.executors.length === 0}
                     onClick={() => void submitEmptyTasks()}
                   >
                     {busy ? 'Adding…' : 'Add empty tasks'}

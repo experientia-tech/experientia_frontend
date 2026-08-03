@@ -122,6 +122,7 @@ export interface Campaign extends CampaignListItem {
   organization_id: string
   tasks: Task[]
   executors: User[]
+  task_assignees?: User[]
   members: Member[]
   tasks_page: number
   tasks_page_size: number

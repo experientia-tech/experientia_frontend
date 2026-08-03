@@ -1,4 +1,5 @@
-import { MapContainer, TileLayer, Marker, Circle, useMapEvents, Popup } from 'react-leaflet'
+import { useEffect, useMemo, useRef } from 'react'
+import { MapContainer, TileLayer, Marker, Circle, useMap, useMapEvents, Popup } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
@@ -27,6 +28,37 @@ function ClickHandler({ onPick }: { onPick: (pos: LatLng) => void }) {
   return null
 }
 
+/** Pan/zoom without remounting the map (remounts were making clicks feel broken). */
+function MapViewSync({
+  target,
+  zoom,
+  radiusKm,
+}: {
+  target: LatLng
+  zoom: number
+  radiusKm?: number
+}) {
+  const map = useMap()
+  const last = useRef<string>('')
+
+  useEffect(() => {
+    const key = `${target.lat.toFixed(5)},${target.lng.toFixed(5)},${zoom},${radiusKm ?? 0}`
+    if (last.current === key) return
+    last.current = key
+    if (radiusKm && radiusKm > 0) {
+      const meters = radiusKm * 1000
+      map.fitBounds(
+        L.latLng(target.lat, target.lng).toBounds(meters * 2.2),
+        { animate: true, padding: [24, 24] }
+      )
+    } else {
+      map.setView([target.lat, target.lng], zoom, { animate: true })
+    }
+  }, [target.lat, target.lng, zoom, radiusKm, map])
+
+  return null
+}
+
 interface Props {
   center?: LatLng
   zoom?: number
@@ -40,8 +72,8 @@ interface Props {
 }
 
 export function LocationMap({
-  center = { lat: 12.9716, lng: 77.5946 },
-  zoom = 12,
+  center = { lat: 20.5937, lng: 78.9629 },
+  zoom = 5,
   value,
   onChange,
   markers = [],
@@ -49,15 +81,17 @@ export function LocationMap({
   height = 320,
   interactive = true,
 }: Props) {
-  const mapCenter = value || center
-  const circleCenter = value || (radiusKm ? center : null)
+  const pin = value || null
+  const viewTarget = pin || center
+  const viewZoom = pin ? (radiusKm ? 13 : zoom) : zoom
+  // Stable mount center — never remount MapContainer when the pin moves.
+  const initialCenter = useMemo(() => viewTarget, [])
 
   return (
     <div className="map-wrap" style={{ height }}>
       <MapContainer
-        key={`${mapCenter.lat.toFixed(5)}-${mapCenter.lng.toFixed(5)}-${radiusKm ?? 0}`}
-        center={[mapCenter.lat, mapCenter.lng]}
-        zoom={radiusKm ? 13 : zoom}
+        center={[initialCenter.lat, initialCenter.lng]}
+        zoom={pin && radiusKm ? 13 : zoom}
         style={{ height: '100%', width: '100%', borderRadius: 12 }}
         scrollWheelZoom={interactive}
       >
@@ -65,10 +99,11 @@ export function LocationMap({
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
+        <MapViewSync target={viewTarget} zoom={viewZoom} radiusKm={pin ? radiusKm : undefined} />
         {interactive && onChange && <ClickHandler onPick={onChange} />}
-        {circleCenter && radiusKm ? (
+        {pin && radiusKm ? (
           <Circle
-            center={[circleCenter.lat, circleCenter.lng]}
+            center={[pin.lat, pin.lng]}
             radius={radiusKm * 1000}
             pathOptions={{
               color: '#0f6b4c',
@@ -78,11 +113,11 @@ export function LocationMap({
             }}
           />
         ) : null}
-        {value && (
-          <Marker position={[value.lat, value.lng]}>
+        {pin && (
+          <Marker position={[pin.lat, pin.lng]}>
             <Popup>
-              Center · {value.lat.toFixed(6)}, {value.lng.toFixed(6)}
-              {radiusKm ? ` · ${radiusKm} km radius` : ''}
+              Campaign center · {pin.lat.toFixed(5)}, {pin.lng.toFixed(5)}
+              {radiusKm ? ` · ${radiusKm} km capture zone` : ''}
             </Popup>
           </Marker>
         )}

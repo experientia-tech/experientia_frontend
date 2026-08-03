@@ -2,11 +2,28 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { listBrands, updateCampaign } from '../api'
 import { LocationMap, type LatLng } from './LocationMap'
 import type { Brand, Campaign } from '../types'
+import { lookupIndianPincode } from '../utils/geocode'
+import { parseApiError } from '../utils/apiError'
 import { useUI } from '../ui'
+
+const DEFAULT_RADIUS_KM = 3
 
 function toDateInput(value?: string | null) {
   if (!value) return ''
   return value.slice(0, 10)
+}
+
+function extractPincode(address?: string | null) {
+  const match = address?.match(/\b(\d{6})\b/)
+  return match?.[1] || ''
+}
+
+function withPincode(address: string, pincode: string) {
+  const pin = pincode.trim()
+  const base = address.trim()
+  if (!pin) return base || undefined
+  if (base.includes(pin)) return base
+  return base ? `${base}, ${pin}` : pin
 }
 
 interface CampaignEditModalProps {
@@ -21,6 +38,7 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
   const [name, setName] = useState(campaign.name)
   const [description, setDescription] = useState(campaign.description || '')
   const [address, setAddress] = useState(campaign.address || '')
+  const [pincode, setPincode] = useState(extractPincode(campaign.address))
   const [status, setStatus] = useState(campaign.status || 'ACTIVE')
   const [brandId, setBrandId] = useState(campaign.brand_id || '')
   const [startDate, setStartDate] = useState(toDateInput(campaign.start_date))
@@ -37,6 +55,7 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
     campaign.center_longitude != null ? String(campaign.center_longitude) : ''
   )
   const [busy, setBusy] = useState(false)
+  const [lookingUpPin, setLookingUpPin] = useState(false)
 
   useEffect(() => {
     void listBrands().then(setBrands)
@@ -48,6 +67,21 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
     setLngInput(pos.lng.toFixed(6))
   }
 
+  const applyPincode = async () => {
+    setLookingUpPin(true)
+    try {
+      const result = await lookupIndianPincode(pincode)
+      applyCenter({ lat: result.lat, lng: result.lng })
+      setPincode(result.pincode || pincode.trim())
+      if (!address.trim()) setAddress(result.label)
+      showSuccess(`Mapped pincode ${result.pincode || pincode}`)
+    } catch (error) {
+      showError(parseApiError(error, 'Could not find that pincode'))
+    } finally {
+      setLookingUpPin(false)
+    }
+  }
+
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!name.trim()) {
@@ -57,7 +91,11 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
     const lat = Number(latInput)
     const lng = Number(lngInput)
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      showError('Enter a valid map center (latitude / longitude)')
+      showError('Set a location via pincode or map pin')
+      return
+    }
+    if (pincode.trim() && !/^\d{6}$/.test(pincode.trim())) {
+      showError('Pincode must be a 6-digit Indian PIN')
       return
     }
     if (startDate && endDate && endDate < startDate) {
@@ -69,7 +107,7 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
       const updated = await updateCampaign(campaign.id, {
         name: name.trim(),
         description: description.trim(),
-        address: address.trim() || undefined,
+        address: withPincode(address, pincode),
         status,
         brand_id: brandId || null,
         center_latitude: lat,
@@ -125,6 +163,26 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
             Address
             <input value={address} onChange={(e) => setAddress(e.target.value)} />
           </label>
+          <div className="form-row two pincode-row">
+            <label className="form-field">
+              Pincode
+              <input
+                value={pincode}
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="e.g. 560001"
+                onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn secondary coord-go"
+              disabled={lookingUpPin || pincode.trim().length !== 6}
+              onClick={() => void applyPincode()}
+            >
+              {lookingUpPin ? 'Finding…' : 'Find on map'}
+            </button>
+          </div>
           <label className="form-field">
             Description
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
@@ -165,11 +223,15 @@ export function CampaignEditModal({ campaign, onClose, onSaved }: CampaignEditMo
               />
             </label>
           </div>
+          <p className="muted small">
+            Click the map to move the pin. Executors must capture within {DEFAULT_RADIUS_KM} km.
+          </p>
           <LocationMap
             center={center || { lat: 20.5937, lng: 78.9629 }}
             value={center}
             onChange={applyCenter}
-            height={220}
+            radiusKm={DEFAULT_RADIUS_KM}
+            height={240}
             zoom={center ? 13 : 5}
           />
           <div className="modal-actions">

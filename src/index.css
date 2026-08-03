@@ -377,6 +377,8 @@ p {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  text-align: center;
   gap: 0.4rem;
 }
 
@@ -1534,6 +1536,18 @@ th {
 .coord-go {
   white-space: nowrap;
   height: fit-content;
+}
+
+.pincode-row {
+  grid-template-columns: 1fr auto;
+}
+
+.campaign-edit-modal .pincode-row {
+  align-items: end;
+}
+
+.campaign-edit-modal .pincode-row .coord-go {
+  margin-bottom: 0.15rem;
 }
 
 .capture-box {
@@ -3242,6 +3256,8 @@ th {
 
 .alert-ok {
   min-width: 120px;
+  justify-content: center;
+  text-align: center;
 }
 
 @keyframes alert-pop {

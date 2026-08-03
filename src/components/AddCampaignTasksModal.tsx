@@ -1,4 +1,5 @@
-import { createPortal, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { addCampaignTasks, submitTaskDetails, uploadProofFast } from '../api'
 import { acquireCameraStream, CameraCapture } from './CameraCapture'
 import type { Campaign, ServiceType } from '../types'

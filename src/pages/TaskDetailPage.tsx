@@ -15,10 +15,23 @@ import { ProofThumbGrid } from '../components/ProofThumbGrid'
 import type { Campaign, ProofImage, Task } from '../types'
 import { CAPTURE_SLOTS, DETAIL_FORM, STATUS_LABELS, canExecutorOpenTask, formatCoords, formatDate, formatDateTime, slotLabel, taskLabel } from '../types'
 import type { ServiceType } from '../types'
-import { enqueueProofUpload, flushProofUploads } from '../utils/proofUploadQueue'
+import { enqueueProofUpload, flushProofUploads, hasPendingProofUpload } from '../utils/proofUploadQueue'
 import { mediaUrl } from '../utils/mediaUrl'
 import { isValidName, isValidPhone, sanitizeNameInput, sanitizePhoneInput } from '../utils/validation'
 import { useUI } from '../ui'
+
+function mergeTaskProofs(server: Task, pending: Map<string, ProofImage>): Task {
+  if (pending.size === 0) return server
+  const proofs = [...server.proof_images]
+  for (const [slot, img] of pending) {
+    if (!proofs.some((p) => p.slot === slot)) proofs.push(img)
+  }
+  return {
+    ...server,
+    proof_images: proofs,
+    proof_image_count: Math.max(server.proof_image_count ?? 0, proofs.length),
+  }
+}
 
 export function TaskDetailPage() {
   const { id } = useParams()
@@ -42,6 +55,8 @@ export function TaskDetailPage() {
   const [previewSlot, setPreviewSlot] = useState<string | null>(null)
   const [previewMapOpen, setPreviewMapOpen] = useState(false)
   const [pendingSlot, setPendingSlot] = useState<string | null>(null)
+  const activeCaptureSlotRef = useRef<string | null>(null)
+  const pendingProofsRef = useRef<Map<string, ProofImage>>(new Map())
   const localUrls = useRef<string[]>([])
   const isSupervisor = user?.role === 'supervisor'
   const isManager = user?.role === 'manager'
@@ -49,24 +64,27 @@ export function TaskDetailPage() {
   const canCapture = isExecutor
   const canManageProofs = isExecutor || isManager
 
+  const applyServerTask = useCallback((server: Task) => {
+    setTask(mergeTaskProofs(server, pendingProofsRef.current))
+  }, [])
 
   const syncTaskQuiet = useCallback(async () => {
     await flushProofUploads()
     const t = await getTask(taskId, { silent: true })
-    setTask(t)
-  }, [taskId])
+    applyServerTask(t)
+  }, [taskId, applyServerTask])
 
   const reload = useCallback(async () => {
     await flushProofUploads()
     const t = await getTask(taskId, { silent: true })
-    setTask(t)
+    applyServerTask(t)
     setDriverName(t.driver_name || '')
     setDriverPhone(t.driver_phone || '')
     setVehicleNumber(t.vehicle_number || '')
     setGymName(t.gym_name || '')
     setGymLocation(t.gym_location || '')
     setCampaign(await getCampaign(t.campaign_id, undefined, { silent: true }))
-  }, [taskId])
+  }, [taskId, applyServerTask])
 
   useEffect(() => {
     void reload()
@@ -125,15 +143,6 @@ export function TaskDetailPage() {
     setPreviewMapOpen(false)
   }, [previewSlot])
 
-  useEffect(() => {
-    if (cameraOpen && canCapture && task && !captureSlot && !pendingSlot) {
-      setCameraOpen(false)
-      cameraStream?.getTracks().forEach((t) => t.stop())
-      setCameraStream(null)
-      void syncTaskQuiet()
-    }
-  }, [cameraOpen, canCapture, task, captureSlot, pendingSlot, cameraStream, syncTaskQuiet])
-
   const releaseCameraStream = useCallback(() => {
     setCameraStream((prev) => {
       prev?.getTracks().forEach((t) => t.stop())
@@ -141,17 +150,28 @@ export function TaskDetailPage() {
     })
   }, [])
 
+  // Close camera once every required slot is filled (no auto-sync wipe).
+  useEffect(() => {
+    if (cameraOpen && canCapture && task && !captureSlot && !pendingSlot) {
+      setCameraOpen(false)
+      releaseCameraStream()
+    }
+  }, [cameraOpen, canCapture, task, captureSlot, pendingSlot, releaseCameraStream])
+
   const openCamera = useCallback(async (slot?: string | null) => {
-    if (slot) setPendingSlot(slot)
+    const target = slot || null
+    if (target) {
+      activeCaptureSlotRef.current = target
+      setPendingSlot(target)
+    }
     setOpeningCamera(true)
     try {
-      // Acquire during the tap gesture so iOS Safari allows the camera.
       const stream = await acquireCameraStream('environment')
       setCameraStream(stream)
       setCameraOpen(true)
     } catch {
       setCameraStream(null)
-      setCameraOpen(true) // UI still opens with retry / gallery fallback
+      setCameraOpen(true)
     } finally {
       setOpeningCamera(false)
     }
@@ -165,20 +185,43 @@ export function TaskDetailPage() {
     }
   }, [task?.latitude, task?.longitude, campaign?.center_latitude, campaign?.center_longitude])
 
-  const hasUsableCoords = useCallback(() => {
-    const c = coords()
-    return Number.isFinite(c.lat) && Number.isFinite(c.lng) && !(c.lat === 0 && c.lng === 0)
-  }, [coords])
-
   const uploadFileToSlot = useCallback(
     async (file: File, slot: string) => {
       if (!task) return
+
+      // Reserve the slot immediately so a concurrent reload cannot drop this capture.
+      const localUrl = URL.createObjectURL(file)
+      localUrls.current.push(localUrl)
+      const placeholder: ProofImage = {
+        url: localUrl,
+        slot,
+        latitude: coords().lat,
+        longitude: coords().lng,
+        captured_at: new Date().toISOString(),
+      }
+      pendingProofsRef.current.set(slot, placeholder)
+      setTask((prev) =>
+        prev
+          ? {
+              ...prev,
+              proof_images: [
+                ...prev.proof_images.filter((p) => p.slot !== slot),
+                placeholder,
+              ],
+              proof_image_count: Math.max(
+                prev.proof_image_count ?? 0,
+                prev.proof_images.filter((p) => p.slot !== slot).length + 1
+              ),
+            }
+          : prev
+      )
+
       if (isExecutor && !geoRef.current && navigator.geolocation) {
         try {
           const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
             navigator.geolocation.getCurrentPosition(resolve, reject, {
               enableHighAccuracy: true,
-              timeout: 8000,
+              timeout: 5000,
               maximumAge: 3000,
             })
           )
@@ -186,37 +229,39 @@ export function TaskDetailPage() {
           setGeoReady(true)
           setGeoError(null)
         } catch {
-          /* fall through to hasUsableCoords check */
+          /* fall through */
         }
       }
-      if (!hasUsableCoords() && isExecutor) {
+
+      const { lat, lng } = coords()
+      if ((!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) && isExecutor) {
+        pendingProofsRef.current.delete(slot)
+        setTask((prev) =>
+          prev
+            ? { ...prev, proof_images: prev.proof_images.filter((p) => p.slot !== slot) }
+            : prev
+        )
         showError('Waiting for GPS — move outdoors or try again')
         return
       }
-      const { lat, lng } = coords()
-      const localUrl = URL.createObjectURL(file)
-      localUrls.current.push(localUrl)
+
       const optimistic: ProofImage = {
-        url: localUrl,
-        slot,
+        ...placeholder,
         latitude: lat,
         longitude: lng,
-        captured_at: new Date().toISOString(),
       }
-
-      startTransition(() => {
-        setTask((prev) =>
-          prev
-            ? {
-                ...prev,
-                proof_images: [
-                  ...prev.proof_images.filter((p) => p.slot !== slot),
-                  optimistic,
-                ],
-              }
-            : prev
-        )
-      })
+      pendingProofsRef.current.set(slot, optimistic)
+      setTask((prev) =>
+        prev
+          ? {
+              ...prev,
+              proof_images: [
+                ...prev.proof_images.filter((p) => p.slot !== slot),
+                optimistic,
+              ],
+            }
+          : prev
+      )
 
       enqueueProofUpload({
         taskId,
@@ -225,27 +270,50 @@ export function TaskDetailPage() {
         lng,
         slot,
         capturedAt: new Date(),
-        onError: () => {
-          startTransition(() => {
-            setTask((prev) =>
-              prev
-                ? { ...prev, proof_images: prev.proof_images.filter((p) => p.slot !== slot) }
-                : prev
-            )
-          })
+        onSuccess: (proof) => {
+          pendingProofsRef.current.delete(slot)
+          setTask((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  proof_images: [
+                    ...prev.proof_images.filter((p) => p.slot !== slot),
+                    proof,
+                  ],
+                  proof_image_count: Math.max(
+                    prev.proof_image_count ?? 0,
+                    prev.proof_images.filter((p) => p.slot !== slot).length + 1
+                  ),
+                }
+              : prev
+          )
+        },
+        onError: (message) => {
+          pendingProofsRef.current.delete(slot)
+          setTask((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  proof_images: prev.proof_images.filter((p) => p.slot !== slot),
+                }
+              : prev
+          )
+          showError(message || 'Photo upload failed — try again')
         },
       })
     },
-    [task, coords, hasUsableCoords, isExecutor, showError, taskId]
+    [task, coords, isExecutor, showError, taskId]
   )
 
   const onCaptureFile = useCallback(
     (file: File) => {
       const slot =
+        activeCaptureSlotRef.current ||
         pendingSlot ||
         (previewSlot && canManageProofs ? previewSlot : null) ||
         slots.find((s) => !task?.proof_images.some((p) => p.slot === s))
       if (!slot) return
+      activeCaptureSlotRef.current = null
       setPreviewSlot(null)
       setPendingSlot(null)
       setCameraOpen(false)
@@ -258,13 +326,16 @@ export function TaskDetailPage() {
   const handleCameraClose = useCallback(() => {
     setCameraOpen(false)
     setPendingSlot(null)
+    activeCaptureSlotRef.current = null
     releaseCameraStream()
-    void syncTaskQuiet()
+    // Don't refetch while an upload is in flight — that was wiping proofs.
+    if (!hasPendingProofUpload()) void syncTaskQuiet()
   }, [syncTaskQuiet, releaseCameraStream])
 
   const onDeleteProof = useCallback(
     (slot: string) => {
       setPreviewSlot(null)
+      pendingProofsRef.current.delete(slot)
       startTransition(() => {
         setTask((prev) =>
           prev ? { ...prev, proof_images: prev.proof_images.filter((p) => p.slot !== slot) } : prev
@@ -279,6 +350,7 @@ export function TaskDetailPage() {
     (slot: string) => {
       setPreviewSlot(null)
       setPendingSlot(slot)
+      pendingProofsRef.current.delete(slot)
       startTransition(() => {
         setTask((prev) =>
           prev ? { ...prev, proof_images: prev.proof_images.filter((p) => p.slot !== slot) } : prev

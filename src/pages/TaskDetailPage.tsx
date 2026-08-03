@@ -1,4 +1,5 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import {
   deleteTaskProof,
@@ -7,7 +8,7 @@ import {
   submitTaskDetails,
 } from '../api'
 import { useAuth } from '../auth'
-import { CameraCapture } from '../components/CameraCapture'
+import { acquireCameraStream, CameraCapture } from '../components/CameraCapture'
 import { GlobalLoaderInline } from '../components/GlobalLoader'
 import { LocationMap } from '../components/LocationMap'
 import { ProofThumbGrid } from '../components/ProofThumbGrid'
@@ -27,6 +28,8 @@ export function TaskDetailPage() {
   const [task, setTask] = useState<Task | null>(null)
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const geoRef = useRef<{ lat: number; lng: number } | null>(null)
+  const [geoReady, setGeoReady] = useState(false)
+  const [geoError, setGeoError] = useState<string | null>(null)
   const [driverName, setDriverName] = useState('')
   const [driverPhone, setDriverPhone] = useState('')
   const [vehicleNumber, setVehicleNumber] = useState('')
@@ -34,7 +37,8 @@ export function TaskDetailPage() {
   const [gymLocation, setGymLocation] = useState('')
   const [savingDetails, setSavingDetails] = useState(false)
   const [cameraOpen, setCameraOpen] = useState(false)
-  const [cameraDismissed, setCameraDismissed] = useState(false)
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null)
+  const [openingCamera, setOpeningCamera] = useState(false)
   const [previewSlot, setPreviewSlot] = useState<string | null>(null)
   const [previewMapOpen, setPreviewMapOpen] = useState(false)
   const [pendingSlot, setPendingSlot] = useState<string | null>(null)
@@ -66,21 +70,39 @@ export function TaskDetailPage() {
 
   useEffect(() => {
     void reload()
-    if (!navigator.geolocation) return
+  }, [reload])
+
+  useEffect(() => {
+    if (!isExecutor) return
+    if (!navigator.geolocation) {
+      setGeoError('Location unavailable on this device')
+      return
+    }
+    setGeoError(null)
+    const applyPos = (pos: GeolocationPosition) => {
+      geoRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+      setGeoReady(true)
+      setGeoError(null)
+    }
+    navigator.geolocation.getCurrentPosition(applyPos, () => {
+      setGeoError('Waiting for GPS — move outdoors or check location settings')
+    }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 5000 })
     const watch = navigator.geolocation.watchPosition(
-      (pos) => {
-        geoRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+      applyPos,
+      () => {
+        if (!geoRef.current) setGeoError('Location permission needed')
       },
-      () => {},
-      { enableHighAccuracy: true, maximumAge: 5000 }
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
     )
     return () => navigator.geolocation.clearWatch(watch)
-  }, [reload])
+  }, [isExecutor, taskId])
 
   useEffect(
     () => () => {
       localUrls.current.forEach((u) => URL.revokeObjectURL(u))
+      cameraStream?.getTracks().forEach((t) => t.stop())
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   )
 
@@ -100,25 +122,40 @@ export function TaskDetailPage() {
   const captureSlot = nextSlot
 
   useEffect(() => {
-    setCameraDismissed(false)
-  }, [taskId])
-
-  useEffect(() => {
     setPreviewMapOpen(false)
   }, [previewSlot])
 
   useEffect(() => {
-    if (canCapture && task && captureSlot && !previewSlot && !cameraDismissed && !cameraOpen) {
-      setCameraOpen(true)
-    }
-  }, [canCapture, task?.id, captureSlot, previewSlot, cameraDismissed, cameraOpen])
-
-  useEffect(() => {
-    if (cameraOpen && canCapture && task && !captureSlot) {
+    if (cameraOpen && canCapture && task && !captureSlot && !pendingSlot) {
       setCameraOpen(false)
+      cameraStream?.getTracks().forEach((t) => t.stop())
+      setCameraStream(null)
       void syncTaskQuiet()
     }
-  }, [cameraOpen, canCapture, task, captureSlot, syncTaskQuiet])
+  }, [cameraOpen, canCapture, task, captureSlot, pendingSlot, cameraStream, syncTaskQuiet])
+
+  const releaseCameraStream = useCallback(() => {
+    setCameraStream((prev) => {
+      prev?.getTracks().forEach((t) => t.stop())
+      return null
+    })
+  }, [])
+
+  const openCamera = useCallback(async (slot?: string | null) => {
+    if (slot) setPendingSlot(slot)
+    setOpeningCamera(true)
+    try {
+      // Acquire during the tap gesture so iOS Safari allows the camera.
+      const stream = await acquireCameraStream('environment')
+      setCameraStream(stream)
+      setCameraOpen(true)
+    } catch {
+      setCameraStream(null)
+      setCameraOpen(true) // UI still opens with retry / gallery fallback
+    } finally {
+      setOpeningCamera(false)
+    }
+  }, [])
 
   const coords = useCallback(() => {
     const geo = geoRef.current
@@ -134,8 +171,24 @@ export function TaskDetailPage() {
   }, [coords])
 
   const uploadFileToSlot = useCallback(
-    (file: File, slot: string) => {
+    async (file: File, slot: string) => {
       if (!task) return
+      if (isExecutor && !geoRef.current && navigator.geolocation) {
+        try {
+          const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 8000,
+              maximumAge: 3000,
+            })
+          )
+          geoRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }
+          setGeoReady(true)
+          setGeoError(null)
+        } catch {
+          /* fall through to hasUsableCoords check */
+        }
+      }
       if (!hasUsableCoords() && isExecutor) {
         showError('Waiting for GPS — move outdoors or try again')
         return
@@ -196,17 +249,18 @@ export function TaskDetailPage() {
       setPreviewSlot(null)
       setPendingSlot(null)
       setCameraOpen(false)
-      uploadFileToSlot(file, slot)
+      releaseCameraStream()
+      void uploadFileToSlot(file, slot)
     },
-    [pendingSlot, previewSlot, canManageProofs, slots, task, uploadFileToSlot]
+    [pendingSlot, previewSlot, canManageProofs, slots, task, uploadFileToSlot, releaseCameraStream]
   )
 
   const handleCameraClose = useCallback(() => {
     setCameraOpen(false)
-    setCameraDismissed(true)
     setPendingSlot(null)
+    releaseCameraStream()
     void syncTaskQuiet()
-  }, [syncTaskQuiet])
+  }, [syncTaskQuiet, releaseCameraStream])
 
   const onDeleteProof = useCallback(
     (slot: string) => {
@@ -224,7 +278,6 @@ export function TaskDetailPage() {
   const onRetakeProof = useCallback(
     (slot: string) => {
       setPreviewSlot(null)
-      setCameraDismissed(false)
       setPendingSlot(slot)
       startTransition(() => {
         setTask((prev) =>
@@ -233,20 +286,12 @@ export function TaskDetailPage() {
       })
       void deleteTaskProof(taskId, slot)
         .then(() => {
-          if (isExecutor) setCameraOpen(true)
+          if (isExecutor) void openCamera(slot)
         })
         .catch(() => syncTaskQuiet())
     },
-    [taskId, syncTaskQuiet, isExecutor]
+    [taskId, syncTaskQuiet, isExecutor, openCamera]
   )
-
-  const startUploadForSlot = (slot: string) => {
-    setPendingSlot(slot)
-    if (isExecutor) {
-      setCameraDismissed(false)
-      setCameraOpen(true)
-    }
-  }
 
   const onSubmitDetails = async (e: FormEvent) => {
     e.preventDefault()
@@ -477,6 +522,11 @@ export function TaskDetailPage() {
           {canCapture && (
             <div className="capture-box stack">
               <h3>Capture sequence</h3>
+              <p className={`geo-status ${geoReady ? 'ok' : 'warn'}`}>
+                {geoReady
+                  ? 'GPS ready'
+                  : geoError || 'Getting GPS fix…'}
+              </p>
               <ol className="slot-steps">
                 {slots.map((s) => (
                   <li
@@ -493,12 +543,10 @@ export function TaskDetailPage() {
                 <button
                   type="button"
                   className="btn primary capture-btn"
-                  onClick={() => {
-                    setCameraDismissed(false)
-                    setCameraOpen(true)
-                  }}
+                  disabled={openingCamera}
+                  onClick={() => void openCamera(captureSlot)}
                 >
-                  Capture {slotLabel(captureSlot)}
+                  {openingCamera ? 'Opening camera…' : `Capture ${slotLabel(captureSlot)}`}
                 </button>
               )}
 
@@ -566,12 +614,10 @@ export function TaskDetailPage() {
           )}
 
           <h3>Proof photos</h3>
-          {canManageProofs && (
+          {isManager && (
             <div className="manager-proof-tools stack">
               <p className="muted">
-                {isManager
-                  ? 'Add or replace photos for any required slot. Geofence checks are skipped for managers.'
-                  : 'Capture photos in order using the camera.'}
+                Add or replace photos for any required slot. Geofence checks are skipped for managers.
               </p>
               <div className="manager-slot-list">
                 {slots.map((slot) => {
@@ -585,39 +631,19 @@ export function TaskDetailPage() {
                         </span>
                       </div>
                       <div className="actions">
-                        {isManager && (
-                          <label className="btn ghost file-btn">
-                            {has ? 'Replace file' : 'Upload file'}
-                            <input
-                              type="file"
-                              accept="image/*"
-                              hidden
-                              onChange={(e) => {
-                                const file = e.target.files?.[0]
-                                e.target.value = ''
-                                if (file) uploadFileToSlot(file, slot)
-                              }}
-                            />
-                          </label>
-                        )}
-                        {isExecutor && !has && (
-                          <button
-                            type="button"
-                            className="btn primary"
-                            onClick={() => startUploadForSlot(slot)}
-                          >
-                            Capture
-                          </button>
-                        )}
-                        {isExecutor && has && (
-                          <button
-                            type="button"
-                            className="btn ghost"
-                            onClick={() => onRetakeProof(slot)}
-                          >
-                            Retake
-                          </button>
-                        )}
+                        <label className="btn ghost file-btn">
+                          {has ? 'Replace file' : 'Upload file'}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            hidden
+                            onChange={(e) => {
+                              const file = e.target.files?.[0]
+                              e.target.value = ''
+                              if (file) uploadFileToSlot(file, slot)
+                            }}
+                          />
+                        </label>
                         {has && (
                           <button
                             type="button"
@@ -634,6 +660,9 @@ export function TaskDetailPage() {
               </div>
             </div>
           )}
+          {canCapture && uploadedSlots.size > 0 && (
+            <p className="muted small">Tap a photo to retake or delete.</p>
+          )}
           <ProofThumbGrid
             images={task.proof_images}
             interactive={canManageProofs || isSupervisor}
@@ -644,13 +673,17 @@ export function TaskDetailPage() {
         </section>
       </div>
 
-      {cameraOpen && (pendingSlot || captureSlot) && (
-        <CameraCapture
-          label={slotLabel(pendingSlot || captureSlot!)}
-          onClose={handleCameraClose}
-          onCapture={onCaptureFile}
-        />
-      )}
+      {cameraOpen &&
+        (pendingSlot || captureSlot) &&
+        createPortal(
+          <CameraCapture
+            label={slotLabel(pendingSlot || captureSlot!)}
+            initialStream={cameraStream}
+            onClose={handleCameraClose}
+            onCapture={onCaptureFile}
+          />,
+          document.body
+        )}
 
       {previewImage && previewSlot && (
         <div className="proof-preview-backdrop" onClick={() => setPreviewSlot(null)}>

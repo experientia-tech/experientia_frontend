@@ -1601,6 +1601,7 @@ th {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  pointer-events: none;
 }
 
 .camera-loading {
@@ -1619,6 +1620,8 @@ th {
 }
 
 .camera-controls {
+  position: relative;
+  z-index: 5;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1626,17 +1629,24 @@ th {
   padding: 1.25rem 1rem;
   padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
   background: rgba(0, 0, 0, 0.75);
+  pointer-events: auto;
+  touch-action: manipulation;
 }
 
 .camera-shutter {
-  width: 4.25rem;
-  height: 4.25rem;
+  width: 4.5rem;
+  height: 4.5rem;
+  min-width: 4.5rem;
+  min-height: 4.5rem;
   border-radius: 50%;
   border: 4px solid #fff;
-  background: transparent;
+  background: #fff;
   box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.25);
   cursor: pointer;
   transition: transform 0.12s ease;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  pointer-events: auto;
 }
 
 .camera-shutter:not(:disabled):active {
@@ -2247,6 +2257,10 @@ th {
   margin: 0 auto;
 }
 
+.executor-app-focused .executor-main {
+  padding-top: 0;
+}
+
 .executor-page {
   display: flex;
   flex-direction: column;
@@ -2624,7 +2638,35 @@ th {
   font-size: 1.35rem;
   line-height: 1;
   cursor: pointer;
-  padding: 0.25rem 0.5rem;
+  padding: 0.5rem 0.75rem;
+  min-width: 44px;
+  min-height: 44px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.geo-status {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.55rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.geo-status.ok {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.geo-status.warn {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.executor-perm-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #b45309;
 }
 
 .proof-thumb-btn {

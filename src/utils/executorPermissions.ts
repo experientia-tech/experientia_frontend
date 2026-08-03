@@ -21,6 +21,10 @@ export function savePermissionSnapshot(next: ExecutorPermissions) {
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next))
 }
 
+export function clearPermissionSnapshot() {
+  sessionStorage.removeItem(STORAGE_KEY)
+}
+
 export async function probeCameraPermission(): Promise<PermissionState> {
   try {
     const status = await navigator.permissions.query({ name: 'camera' as PermissionName })
@@ -53,7 +57,13 @@ export async function requestCameraAccess(): Promise<boolean> {
     stream.getTracks().forEach((t) => t.stop())
     return true
   } catch {
-    return false
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      stream.getTracks().forEach((t) => t.stop())
+      return true
+    } catch {
+      return false
+    }
   }
 }
 
@@ -63,7 +73,7 @@ export async function requestLocationAccess(): Promise<boolean> {
     await new Promise<GeolocationPosition>((resolve, reject) =>
       navigator.geolocation.getCurrentPosition(resolve, reject, {
         enableHighAccuracy: true,
-        timeout: 10000,
+        timeout: 15000,
         maximumAge: 0,
       })
     )
@@ -73,12 +83,14 @@ export async function requestLocationAccess(): Promise<boolean> {
   }
 }
 
+/** Probe first; only prompt when status is unknown (avoids useless prompts when blocked). */
 export async function ensureExecutorPermissions(): Promise<ExecutorPermissions> {
   let camera = await probeCameraPermission()
   let location = await probeLocationPermission()
 
+  // Many mobile browsers don't support Permissions API for camera — treat unknown as needs request.
   if (camera !== 'granted') {
-    camera = (await requestCameraAccess()) ? 'granted' : 'denied'
+    camera = (await requestCameraAccess()) ? 'granted' : camera === 'denied' ? 'denied' : 'denied'
   }
   if (location !== 'granted') {
     location = (await requestLocationAccess()) ? 'granted' : 'denied'

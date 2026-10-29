@@ -1,6 +1,13 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { createCampaign, createBrand, listBrands, listExecutors, uploadBrandLogo } from '../api'
+import {
+  createCampaign,
+  createBrand,
+  listBrands,
+  listExecutors,
+  uploadBrandLogo,
+  uploadCreativeSource,
+} from '../api'
 import { LocationMap, type LatLng } from '../components/LocationMap'
 import type { Brand, ServiceType, User } from '../types'
 import { DETAIL_FORM, PHOTOS_REQUIRED, SERVICE_TYPES } from '../types'
@@ -8,6 +15,9 @@ import { mediaUrl } from '../utils/mediaUrl'
 import { useUI } from '../ui'
 
 const DEFAULT_RADIUS_KM = 3
+const CREATIVE_MAX_TASKS = 1000
+const CREATIVE_MAX_BYTES = 25 * 1024 * 1024
+const CREATIVE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
 
 function parseCoord(value: string, min: number, max: number): number | null {
   const n = Number(value.trim())
@@ -36,6 +46,21 @@ export function NewCampaignPage() {
   const [endDate, setEndDate] = useState('')
   const [selectedExecs, setSelectedExecs] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
+  const [creativeFile, setCreativeFile] = useState<File | null>(null)
+  // Storage key for the uploaded creativeFile, reused if create fails and the form is resubmitted.
+  const [creativeKey, setCreativeKey] = useState<string | null>(null)
+
+  const isCreative = serviceType === 'Creative'
+  const creativePreview = useMemo(
+    () => (creativeFile ? URL.createObjectURL(creativeFile) : null),
+    [creativeFile]
+  )
+  useEffect(
+    () => () => {
+      if (creativePreview) URL.revokeObjectURL(creativePreview)
+    },
+    [creativePreview]
+  )
 
   const photosNeeded = PHOTOS_REQUIRED[serviceType]
   const formHint =
@@ -124,8 +149,31 @@ export function NewCampaignPage() {
       showError('End date must be on or after start date')
       return
     }
+    if (isCreative) {
+      if (!creativeFile) {
+        showError('Creative campaigns need a source image')
+        return
+      }
+      if (!CREATIVE_TYPES.includes(creativeFile.type)) {
+        showError('Source image must be JPG, PNG or WebP')
+        return
+      }
+      if (creativeFile.size > CREATIVE_MAX_BYTES) {
+        showError('Source image too large (max 25MB)')
+        return
+      }
+      if (totalTasks > CREATIVE_MAX_TASKS) {
+        showError(`Creative campaigns allow at most ${CREATIVE_MAX_TASKS} tasks`)
+        return
+      }
+    }
     setBusy(true)
     try {
+      let sourceImageKey: string | null = null
+      if (isCreative && creativeFile) {
+        sourceImageKey = creativeKey ?? (await uploadCreativeSource(creativeFile))
+        setCreativeKey(sourceImageKey)
+      }
       const campaign = await createCampaign({
         name: name.trim(),
         brand_id: brandId || null,
@@ -139,6 +187,7 @@ export function NewCampaignPage() {
         executor_ids: selectedExecs,
         start_date: startDate || null,
         end_date: endDate || null,
+        source_image_key: sourceImageKey,
       })
       navigate(`/campaigns/${campaign.id}`)
     } catch {
@@ -217,11 +266,33 @@ export function NewCampaignPage() {
               ))}
             </select>
           </label>
+          {isCreative && (
+            <div className="stack creative-source-field">
+              <label>
+                Creative image
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(e) => {
+                    setCreativeFile(e.target.files?.[0] || null)
+                    setCreativeKey(null)
+                  }}
+                />
+              </label>
+              <p className="muted small">
+                Each task gets its own copy of this image with a unique code printed below it.
+              </p>
+              {creativePreview && (
+                <img className="creative-source-preview" src={creativePreview} alt="Creative preview" />
+              )}
+            </div>
+          )}
           <div className="zone-summary">
             <strong>Executor capture</strong>
             <p>
               {photosNeeded} photo{photosNeeded === 1 ? '' : 's'}
-              {serviceType === 'Auto Hood' ? ' — front → side → back' : ''}. {formHint}. Must be
+              {serviceType === 'Auto Hood' ? ' — front → side → back' : ''}
+              {isCreative ? ' of the put-up creative, verified by its code' : ''}. {formHint}. Must be
               within {radiusForMap} km of the campaign center.
             </p>
           </div>
@@ -242,7 +313,7 @@ export function NewCampaignPage() {
             <input
               type="number"
               min={1}
-              max={10000}
+              max={isCreative ? CREATIVE_MAX_TASKS : 10000}
               value={totalTasks}
               onChange={(e) => setTotalTasks(Number(e.target.value))}
               required

@@ -4,7 +4,21 @@ import {
   feedbackStartLoading,
   feedbackStopLoading,
 } from './feedback'
-import type { Brand, Campaign, CampaignListItem, ExecutorCampaign, ExecutorTasksPage, ServiceType, Task, User, ProofImage } from './types'
+import type {
+  Brand,
+  Campaign,
+  CampaignListItem,
+  CreativeCampaign,
+  CreativeReport,
+  CreativeReportItem,
+  CreativeVerificationStatus,
+  ExecutorCampaign,
+  ExecutorTasksPage,
+  ServiceType,
+  Task,
+  User,
+  ProofImage,
+} from './types'
 import { parseApiError } from './utils/apiError'
 
 /** Empty in local dev (Vite proxies /api). Set VITE_API_URL in production builds. */
@@ -122,6 +136,7 @@ export async function createCampaign(payload: {
   executor_ids?: string[]
   start_date?: string | null
   end_date?: string | null
+  source_image_key?: string | null
 }) {
   const { data } = await api.post<Campaign>('/campaigns', payload)
   return data
@@ -230,6 +245,76 @@ export async function uploadBrandLogo(file: File, brandId?: string): Promise<str
   }
 }
 
+/** Upload the source image for a Creative campaign; returns its storage key. */
+export async function uploadCreativeSource(file: File): Promise<string> {
+  feedbackStartLoading()
+  try {
+    const { data: presign } = await api.post<{
+      upload_url: string
+      storage_key: string
+      public_url: string
+      use_direct_put: boolean
+    }>(
+      '/uploads/presign-creative',
+      { filename: file.name, content_type: file.type || 'image/jpeg' },
+      silent
+    )
+
+    await uploadFileToStorage(presign, file)
+    return presign.storage_key
+  } catch (error) {
+    feedbackShowAlert({
+      kind: 'error',
+      title: '',
+      message: parseApiError(error, 'Upload failed'),
+    })
+    throw error
+  } finally {
+    feedbackStopLoading()
+  }
+}
+
+export async function getCreativeReport(
+  campaignId: string,
+  params?: { status?: CreativeVerificationStatus; page?: number; limit?: number },
+  opts?: { silent?: boolean }
+) {
+  const { data } = await api.get<CreativeReport>(`/campaigns/${campaignId}/creative-report`, {
+    params,
+    ...(opts?.silent ? silent : {}),
+  })
+  return data
+}
+
+/** Set a task's verification code; omit `code` to have the server generate one. */
+export async function setCreativeCode(taskId: string, code?: string) {
+  const { data } = await api.put<CreativeReportItem>(`/tasks/${taskId}/creative-code`, { code })
+  return data
+}
+
+export async function manualVerifyCreative(
+  taskId: string,
+  status: 'VERIFIED' | 'FAILED',
+  note?: string
+) {
+  const { data } = await api.post<CreativeReportItem>(`/tasks/${taskId}/creative-verify`, {
+    status,
+    note,
+  })
+  return data
+}
+
+export async function creativeVerifyNow(campaignId: string) {
+  const { data } = await api.post<{ ok: boolean; queued: number }>(
+    `/campaigns/${campaignId}/creative-verify-now`
+  )
+  return data
+}
+
+export async function retryCreativeGeneration(campaignId: string) {
+  const { data } = await api.post<CreativeCampaign>(`/campaigns/${campaignId}/creative-generate`)
+  return data
+}
 
 export async function listExecutors() {
   const { data } = await api.get<User[]>('/users/executors')
@@ -356,6 +441,33 @@ export async function listCampaignExports(campaignId: string) {
 export async function getCampaignExportJob(campaignId: string, jobId: string) {
   const { data } = await api.get<ExportJob>(`/campaigns/${campaignId}/export/jobs/${jobId}`)
   return data
+}
+
+/** All generated creatives in one print-ready PDF (one page per task). */
+export async function downloadCreativePrintPdf(campaignId: string, filename: string) {
+  feedbackStartLoading()
+  try {
+    const token = localStorage.getItem('token')
+    const res = await fetch(`${API_PREFIX}/campaigns/${campaignId}/creative-print.pdf`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) throw new Error('Download failed')
+    const url = URL.createObjectURL(await res.blob())
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    feedbackShowAlert({
+      kind: 'error',
+      title: '',
+      message: parseApiError(error, 'Download failed'),
+    })
+    throw error
+  } finally {
+    feedbackStopLoading()
+  }
 }
 
 export async function downloadCampaignExport(campaignId: string, jobId: string, filename?: string) {

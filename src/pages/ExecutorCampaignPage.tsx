@@ -2,8 +2,15 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { myCampaigns, myTasks } from '../api'
 import { GlobalLoaderInline } from '../components/GlobalLoader'
-import type { ExecutorCampaign, ExecutorTasksPage, Task } from '../types'
-import { canExecutorOpenTask, taskLabel, taskProofCount } from '../types'
+import type { CreativeVerificationStatus, ExecutorCampaign, ExecutorTasksPage, Task } from '../types'
+import { CREATIVE_STATUS_LABELS, canExecutorOpenTask, creativeStatusPill, taskLabel, taskProofCount } from '../types'
+
+// Executors only need to know the task is done; the code check is for managers.
+const EXECUTOR_CREATIVE_LABELS: Partial<Record<CreativeVerificationStatus, string>> = {
+  PENDING_VERIFICATION: 'Submitted',
+  NEEDS_REVIEW: 'Submitted',
+  FAILED: 'Failed – retake',
+}
 
 const PAGE_SIZE = 15
 
@@ -49,8 +56,16 @@ function ExecutorTaskCard({
         </p>
         <p className="executor-task-meta muted small">
           {taskLabel(task)} · {photos}/{needed} photos
-          {!openable && <span className="executor-task-done"> · Completed</span>}
+          {!openable && !task.creative && <span className="executor-task-done"> · Completed</span>}
         </p>
+        {task.creative && (
+          <p className="executor-task-creative">
+            <span className={creativeStatusPill(task.creative.verification_status)}>
+              {EXECUTOR_CREATIVE_LABELS[task.creative.verification_status] ||
+                CREATIVE_STATUS_LABELS[task.creative.verification_status]}
+            </span>
+          </p>
+        )}
       </div>
     </>
   )

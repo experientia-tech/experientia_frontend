@@ -1,14 +1,22 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { deleteCampaign, getCampaign } from '../api'
+import { deleteCampaign, downloadCreativePrintPdf, getCampaign, retryCreativeGeneration } from '../api'
 import { useAuth } from '../auth'
 import { useExportQueueOptional } from '../exportQueue'
 import { CampaignEditModal } from '../components/CampaignEditModal'
 import { AddCampaignTasksModal } from '../components/AddCampaignTasksModal'
 import { CampaignTeamModal, type TeamPanelKind } from '../components/CampaignTeamModal'
+import { CreativeReportPanel } from '../components/CreativeReportPanel'
 import { GlobalLoaderInline } from '../components/GlobalLoader'
 import type { Campaign, Task } from '../types'
-import { STATUS_LABELS, formatDate, taskLabel, taskProofCount } from '../types'
+import {
+  CREATIVE_STATUS_LABELS,
+  STATUS_LABELS,
+  creativeStatusPill,
+  formatDate,
+  taskLabel,
+  taskProofCount,
+} from '../types'
 import { mediaUrl } from '../utils/mediaUrl'
 import { useUI } from '../ui'
 
@@ -17,6 +25,8 @@ const TaskClusterMap = lazy(() =>
 )
 
 type ViewMode = 'card' | 'location'
+
+const GENERATION_POLL_MS = 3000
 
 export function CampaignDetailPage() {
   const { id } = useParams()
@@ -55,6 +65,11 @@ export function CampaignDetailPage() {
   const [roleFilter, setRoleFilter] = useState('All')
   const [mapTasks, setMapTasks] = useState<Task[]>([])
   const [mapTotal, setMapTotal] = useState(0)
+  // Bumped after work that queues image generation (add tasks, assign executors, retry).
+  const [generationKick, setGenerationKick] = useState(0)
+  const [retryBusy, setRetryBusy] = useState(false)
+  const [printBusy, setPrintBusy] = useState(false)
+  const [reportKey, setReportKey] = useState(0)
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebouncedQuery(taskQuery.trim()), 300)
@@ -86,6 +101,63 @@ export function CampaignDetailPage() {
   useEffect(() => {
     setPage(1)
   }, [statusFilter, debouncedQuery, executorFilter])
+
+  const isCreative = !!campaign?.creative
+  const generationStatus = campaign?.creative?.generation_status
+  const generating = generationStatus === 'PENDING' || generationStatus === 'PROCESSING'
+
+  // Poll while Creative images are generating. A kick keeps polling briefly even if the
+  // first refetch still shows COMPLETED, in case the backend hasn't flipped the status yet.
+  useEffect(() => {
+    if (!isCreative) return
+    if (!generating && generationKick === 0) return
+    let quietTicks = 0
+    const t = window.setInterval(() => {
+      if (!generating) quietTicks += 1
+      if (quietTicks > 2) {
+        window.clearInterval(t)
+        setGenerationKick(0)
+        return
+      }
+      void load().catch(() => undefined)
+    }, GENERATION_POLL_MS)
+    return () => window.clearInterval(t)
+  }, [isCreative, generating, generationKick, load])
+
+  const kickGeneration = useCallback(() => {
+    if (isCreative) setGenerationKick((n) => n + 1)
+  }, [isCreative])
+
+  const onSavedTeam = useCallback(async () => {
+    await load()
+    kickGeneration()
+  }, [load, kickGeneration])
+
+  const onDownloadPrintPdf = async () => {
+    if (!campaign) return
+    setPrintBusy(true)
+    try {
+      const safeName = campaign.name.replace(/[^a-z0-9_-]+/gi, '-').slice(0, 40) || 'creatives'
+      await downloadCreativePrintPdf(campaignId, `${safeName}-print.pdf`)
+    } catch {
+      // Shown by downloadCreativePrintPdf
+    } finally {
+      setPrintBusy(false)
+    }
+  }
+
+  const onRetryGeneration = async () => {
+    setRetryBusy(true)
+    try {
+      const creative = await retryCreativeGeneration(campaignId)
+      setCampaign((prev) => (prev ? { ...prev, creative } : prev))
+      kickGeneration()
+    } catch {
+      // API errors shown globally
+    } finally {
+      setRetryBusy(false)
+    }
+  }
 
   useEffect(() => {
     if (viewMode !== 'location') return
@@ -376,6 +448,55 @@ export function CampaignDetailPage() {
         </section>
       )}
 
+      {campaign.creative && generating && (
+        <section className="panel creative-generation">
+          <div className="section-head">
+            <div>
+              <h3>Generating images…</h3>
+              <p className="muted">
+                Each task gets its own copy of the creative with a unique code. This runs in the
+                background.
+              </p>
+            </div>
+            <strong>
+              {campaign.creative.generated_count} / {total}
+            </strong>
+          </div>
+          <div className="progress-track lg">
+            <div
+              className="progress-fill"
+              style={{
+                width: `${total ? Math.min(100, Math.round((campaign.creative.generated_count / total) * 100)) : 0}%`,
+              }}
+            />
+          </div>
+        </section>
+      )}
+
+      {campaign.creative?.generation_status === 'FAILED' && (
+        <section className="panel creative-generation failed">
+          <div className="section-head">
+            <div>
+              <h3>Image generation failed</h3>
+              <p className="muted">
+                {campaign.creative.generation_error || 'Some creatives could not be generated.'}{' '}
+                {campaign.creative.generated_count} / {total} generated.
+              </p>
+            </div>
+            {isManager && (
+              <button
+                type="button"
+                className="btn primary"
+                disabled={retryBusy}
+                onClick={() => void onRetryGeneration()}
+              >
+                {retryBusy ? 'Retrying…' : 'Retry'}
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
       <section className="panel">
         <div className="section-head">
           <div>
@@ -425,6 +546,31 @@ export function CampaignDetailPage() {
             <strong>{formatDate(campaign.end_date)}</strong>
           </div>
         </div>
+        {campaign.creative?.source_image_url && (
+          <div className="creative-source-info">
+            <a href={mediaUrl(campaign.creative.source_image_url)} target="_blank" rel="noreferrer">
+              <img src={mediaUrl(campaign.creative.source_image_url)} alt="Source creative" />
+            </a>
+            <div>
+              <span className="meta-label">Source image</span>
+              <strong>
+                {campaign.creative.generated_count} of {total} creatives generated
+              </strong>
+            </div>
+            {isManager && campaign.creative.print_pdf_ready && (
+              <button
+                type="button"
+                className="btn secondary creative-print-btn"
+                disabled={printBusy}
+                onClick={() => void onDownloadPrintPdf()}
+              >
+                {printBusy
+                  ? 'Downloading…'
+                  : `Download print PDF (${campaign.creative.print_pdf_pages} pages)`}
+              </button>
+            )}
+          </div>
+        )}
         {(campaign.address || campaign.center_latitude != null) && (
           <p className="muted" style={{ marginTop: '0.85rem' }}>
             {campaign.address || 'Campaign zone'}
@@ -644,6 +790,20 @@ export function CampaignDetailPage() {
                           {STATUS_LABELS[task.status] || task.status}
                         </strong>
                       </div>
+                      {task.creative && (
+                        <div>
+                          <span className="meta-label">Code</span>
+                          <strong className="creative-code">{task.creative.verification_code || 'Not set'}</strong>
+                        </div>
+                      )}
+                      {task.creative && (
+                        <div>
+                          <span className="meta-label">Verification</span>
+                          <span className={creativeStatusPill(task.creative.verification_status)}>
+                            {CREATIVE_STATUS_LABELS[task.creative.verification_status]}
+                          </span>
+                        </div>
+                      )}
                       <div>
                         <span className="meta-label">Latitude</span>
                         <strong className="coords-inline">
@@ -677,6 +837,28 @@ export function CampaignDetailPage() {
                         <div className="progress-fill" style={{ width: `${photoPct}%` }} />
                       </div>
                     </div>
+
+                    {task.creative?.code_missing && (
+                      <p className="creative-code-missing" role="alert">
+                        ⚠ Code is missing in this image: no verification code could be read from the
+                        proof photo.
+                      </p>
+                    )}
+
+                    {task.creative && (
+                      <div className="task-thumb-wrap">
+                        {task.creative.generated_image_url ? (
+                          <img
+                            src={mediaUrl(task.creative.generated_image_url)}
+                            alt={`Creative ${task.creative.verification_code ?? ''}`}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        ) : (
+                          <div className="creative-placeholder">Generating…</div>
+                        )}
+                      </div>
+                    )}
 
                     {task.proof_images[0] && (
                       <div className="task-thumb-wrap">
@@ -748,12 +930,20 @@ export function CampaignDetailPage() {
         )}
       </section>
 
+      {isManager && isCreative && (
+        <CreativeReportPanel
+          key={reportKey}
+          campaignId={campaignId}
+          onChanged={() => void load().catch(() => undefined)}
+        />
+      )}
+
       {teamPanel && (
         <CampaignTeamModal
           kind={teamPanel}
           campaign={campaign}
           onClose={() => setTeamPanel(null)}
-          onSaved={load}
+          onSaved={onSavedTeam}
         />
       )}
       {editOpen && (
@@ -773,6 +963,8 @@ export function CampaignDetailPage() {
           onAdded={(updated) => {
             setCampaign((prev) => (prev ? { ...prev, ...updated, tasks: prev.tasks } : updated))
             void load()
+            kickGeneration()
+            setReportKey((k) => k + 1)
           }}
         />
       )}

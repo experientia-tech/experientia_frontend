@@ -5,6 +5,8 @@ import {
   deleteTaskProof,
   getCampaign,
   getTask,
+  manualVerifyCreative,
+  setCreativeCode,
   submitTaskDetails,
 } from '../api'
 import { useAuth } from '../auth'
@@ -13,12 +15,28 @@ import { GlobalLoaderInline } from '../components/GlobalLoader'
 import { LocationMap } from '../components/LocationMap'
 import { ProofThumbGrid } from '../components/ProofThumbGrid'
 import type { Campaign, ProofImage, Task } from '../types'
-import { CAPTURE_SLOTS, DETAIL_FORM, STATUS_LABELS, canExecutorOpenTask, formatCoords, formatDate, formatDateTime, slotLabel, taskLabel } from '../types'
+import {
+  CAPTURE_SLOTS,
+  CREATIVE_STATUS_LABELS,
+  DETAIL_FORM,
+  STATUS_LABELS,
+  canExecutorOpenTask,
+  creativeDetectionLabel,
+  creativeStatusPill,
+  formatCoords,
+  formatDate,
+  formatDateTime,
+  slotLabel,
+  taskLabel,
+} from '../types'
 import type { ServiceType } from '../types'
 import { enqueueProofUpload, flushProofUploads, hasPendingProofUpload } from '../utils/proofUploadQueue'
 import { mediaUrl } from '../utils/mediaUrl'
 import { isValidName, isValidPhone, sanitizeNameInput, sanitizePhoneInput } from '../utils/validation'
 import { useUI } from '../ui'
+
+/** Upload rejections meaning the creative status moved on the server. */
+const CREATIVE_LOCKED_ERRORS = ['Proof is awaiting verification', 'Proof already verified']
 
 function mergeTaskProofs(server: Task, pending: Map<string, ProofImage>): Task {
   if (pending.size === 0) return server
@@ -37,7 +55,7 @@ export function TaskDetailPage() {
   const { id } = useParams()
   const taskId = id!
   const { user } = useAuth()
-  const { showError } = useUI()
+  const { showError, showSuccess } = useUI()
   const [task, setTask] = useState<Task | null>(null)
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const geoRef = useRef<{ lat: number; lng: number } | null>(null)
@@ -58,6 +76,13 @@ export function TaskDetailPage() {
   const activeCaptureSlotRef = useRef<string | null>(null)
   const pendingProofsRef = useRef<Map<string, ProofImage>>(new Map())
   const localUrls = useRef<string[]>([])
+  // Creative: an upload is in flight, and whether this visit submitted the proof
+  // (keeps the "submitted" message up instead of redirecting straight away).
+  const [creativeUploading, setCreativeUploading] = useState(false)
+  const [creativeSubmitted, setCreativeSubmitted] = useState(false)
+  // Creative: photo taken but not sent yet, so the executor can review it and submit.
+  const [creativeDraft, setCreativeDraft] = useState<{ file: File; url: string; slot: string } | null>(null)
+  const [verdictBusy, setVerdictBusy] = useState(false)
   const isSupervisor = user?.role === 'supervisor'
   const isManager = user?.role === 'manager'
   const isExecutor = user?.role === 'executor'
@@ -134,8 +159,12 @@ export function TaskDetailPage() {
     () => new Set(task?.proof_images.map((p) => p.slot) || []),
     [task?.proof_images]
   )
-  const nextSlot = slots.find((s) => !uploadedSlots.has(s))
-  const photosDone = !nextSlot || (task?.proof_images.length || 0) >= (task?.required_photos || 1)
+  const creative = task?.creative ?? null
+  // A Failed creative still has its photo_1, so retake into it; the backend replaces it.
+  const creativeRetake = creative?.verification_status === 'FAILED' && !creativeUploading
+  const nextSlot = creativeRetake ? slots[0] : slots.find((s) => !uploadedSlots.has(s))
+  const photosDone =
+    !creativeRetake && (!nextSlot || (task?.proof_images.length || 0) >= (task?.required_photos || 1))
   const detailsDone = task?.details_complete ?? false
   const captureSlot = nextSlot
 
@@ -216,7 +245,10 @@ export function TaskDetailPage() {
           : prev
       )
 
-      if (isExecutor && !geoRef.current && navigator.geolocation) {
+      // Creative proofs go straight up: no GPS wait or block, the code check runs later.
+      const isCreativeTask = !!task.creative
+
+      if (isExecutor && !isCreativeTask && !geoRef.current && navigator.geolocation) {
         try {
           const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
             navigator.geolocation.getCurrentPosition(resolve, reject, {
@@ -234,7 +266,11 @@ export function TaskDetailPage() {
       }
 
       const { lat, lng } = coords()
-      if ((!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) && isExecutor) {
+      if (
+        isExecutor &&
+        !isCreativeTask &&
+        (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0))
+      ) {
         pendingProofsRef.current.delete(slot)
         setTask((prev) =>
           prev
@@ -263,6 +299,8 @@ export function TaskDetailPage() {
           : prev
       )
 
+      if (isCreativeTask) setCreativeUploading(true)
+
       enqueueProofUpload({
         taskId,
         file,
@@ -284,9 +322,21 @@ export function TaskDetailPage() {
                     prev.proof_image_count ?? 0,
                     prev.proof_images.filter((p) => p.slot !== slot).length + 1
                   ),
+                  creative: prev.creative
+                    ? {
+                        ...prev.creative,
+                        verification_status: 'PENDING_VERIFICATION',
+                        proof_uploaded_at: new Date().toISOString(),
+                        verification_notes: null,
+                      }
+                    : prev.creative,
                 }
               : prev
           )
+          if (isCreativeTask) {
+            setCreativeUploading(false)
+            setCreativeSubmitted(true)
+          }
         },
         onError: (message) => {
           pendingProofsRef.current.delete(slot)
@@ -298,11 +348,16 @@ export function TaskDetailPage() {
                 }
               : prev
           )
+          if (isCreativeTask) setCreativeUploading(false)
           showError(message || 'Photo upload failed — try again')
+          // Status changed on the server: refresh, which redirects executors back.
+          if (isCreativeTask && CREATIVE_LOCKED_ERRORS.some((m) => message?.includes(m))) {
+            void syncTaskQuiet()
+          }
         },
       })
     },
-    [task, coords, isExecutor, showError, taskId]
+    [task, coords, isExecutor, showError, taskId, syncTaskQuiet]
   )
 
   const onCaptureFile = useCallback(
@@ -318,10 +373,28 @@ export function TaskDetailPage() {
       setPendingSlot(null)
       setCameraOpen(false)
       releaseCameraStream()
+      if (isExecutor && task?.creative) {
+        const url = URL.createObjectURL(file)
+        localUrls.current.push(url)
+        setCreativeDraft({ file, url, slot })
+        return
+      }
       void uploadFileToSlot(file, slot)
     },
-    [pendingSlot, previewSlot, canManageProofs, slots, task, uploadFileToSlot, releaseCameraStream]
+    [pendingSlot, previewSlot, canManageProofs, slots, task, uploadFileToSlot, releaseCameraStream, isExecutor]
   )
+
+  const onSubmitCreative = () => {
+    if (!creativeDraft) return
+    setCreativeDraft(null)
+    void uploadFileToSlot(creativeDraft.file, creativeDraft.slot)
+  }
+
+  const onRetakeCreative = () => {
+    const slot = creativeDraft?.slot
+    setCreativeDraft(null)
+    if (slot) void openCamera(slot)
+  }
 
   const handleCameraClose = useCallback(() => {
     setCameraOpen(false)
@@ -341,9 +414,12 @@ export function TaskDetailPage() {
           prev ? { ...prev, proof_images: prev.proof_images.filter((p) => p.slot !== slot) } : prev
         )
       })
-      void deleteTaskProof(taskId, slot).catch(() => syncTaskQuiet())
+      void deleteTaskProof(taskId, slot)
+        // Deleting a Creative proof resets its verification status on the server.
+        .then(() => (task?.creative ? syncTaskQuiet() : undefined))
+        .catch(() => syncTaskQuiet())
     },
-    [taskId, syncTaskQuiet]
+    [taskId, syncTaskQuiet, task?.creative]
   )
 
   const onRetakeProof = useCallback(
@@ -364,6 +440,48 @@ export function TaskDetailPage() {
     },
     [taskId, syncTaskQuiet, isExecutor, openCamera]
   )
+
+  const onCreativeVerdict = async (verdict: 'VERIFIED' | 'FAILED') => {
+    let note: string | undefined
+    if (verdict === 'FAILED') {
+      const input = window.prompt('Reject this proof? Optional note for the executor:', '')
+      if (input === null) return
+      note = input.trim() || undefined
+    }
+    setVerdictBusy(true)
+    try {
+      await manualVerifyCreative(taskId, verdict, note)
+      showSuccess(verdict === 'VERIFIED' ? 'Proof approved' : 'Proof rejected')
+      await syncTaskQuiet()
+    } catch {
+      // API errors shown globally
+    } finally {
+      setVerdictBusy(false)
+    }
+  }
+
+  const onSetCreativeCode = async (current: string | null) => {
+    // Codes start with the campaign name's first two letters (the server checks the same).
+    const letters = (task?.campaign_name || campaign?.name || '').normalize('NFKD').toUpperCase().replace(/[^A-Z]/g, '')
+    const format = `${(letters + 'XX').slice(0, 2)}-NNNN-NNNN`
+    const input = window.prompt(
+      current
+        ? `Enter a new code (${format}, or just the 8 digits), or leave blank to generate one. The creative image will be re-made.`
+        : `Enter the code (${format}, or just the 8 digits), or leave blank to generate one:`,
+      ''
+    )
+    if (input === null) return
+    setVerdictBusy(true)
+    try {
+      await setCreativeCode(taskId, input.trim() || undefined)
+      showSuccess('Code saved, creative image is being re-made')
+      await syncTaskQuiet()
+    } catch {
+      // API errors shown globally
+    } finally {
+      setVerdictBusy(false)
+    }
+  }
 
   const onSubmitDetails = async (e: FormEvent) => {
     e.preventDefault()
@@ -405,9 +523,12 @@ export function TaskDetailPage() {
 
   if (!task) return <GlobalLoaderInline label="Loading task…" />
 
-  if (canCapture && !canExecutorOpenTask(task)) {
+  if (canCapture && !canExecutorOpenTask(task) && !creativeSubmitted && !creativeUploading) {
     return <Navigate to={`/my/campaigns/${task.campaign_id}`} replace />
   }
+
+  // Executors can't change a Creative proof that's uploading or awaiting its check.
+  const executorProofsLocked = canCapture && !!creative && !creativeRetake && photosDone
 
   const mapCenter =
     campaign?.center_latitude != null
@@ -573,6 +694,96 @@ export function TaskDetailPage() {
         </section>
       )}
 
+      {!canCapture && creative && (
+        <section className="panel creative-panel">
+          <div className="creative-panel-image">
+            {creative.generated_image_url ? (
+              <a href={mediaUrl(creative.generated_image_url)} target="_blank" rel="noreferrer">
+                <img src={mediaUrl(creative.generated_image_url)} alt={`Creative ${creative.verification_code ?? ''}`} />
+              </a>
+            ) : (
+              <div className="creative-placeholder">
+                {creative.verification_code ? 'Generating…' : 'Waiting for a code'}
+              </div>
+            )}
+          </div>
+          <div className="stack">
+            <h3>Creative verification</h3>
+            <div className="meta-grid">
+              <div>
+                <span className="meta-label">Code</span>
+                <strong className="creative-code">{creative.verification_code || 'Not set'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Status</span>
+                <span className={creativeStatusPill(creative.verification_status)}>
+                  {CREATIVE_STATUS_LABELS[creative.verification_status]}
+                </span>
+              </div>
+              <div>
+                <span className="meta-label">Detected code</span>
+                <strong className="creative-code">{creative.detected_code || '—'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Method</span>
+                <strong>{creativeDetectionLabel(creative) || '—'}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Proof uploaded</span>
+                <strong>{formatDateTime(creative.proof_uploaded_at)}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Verified</span>
+                <strong>{formatDateTime(creative.verified_at)}</strong>
+              </div>
+            </div>
+            {creative.code_missing && (
+              <p className="creative-code-missing" role="alert">
+                ⚠ Code is missing in this image: no verification code could be read from the proof photo.
+              </p>
+            )}
+            {creative.verification_notes && (
+              <div className="task-notes">
+                <span className="meta-label">Verification notes</span>
+                <p>{creative.verification_notes}</p>
+              </div>
+            )}
+            {isManager && (
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn secondary"
+                  disabled={verdictBusy || creative.verification_status === 'VERIFIED'}
+                  onClick={() => void onSetCreativeCode(creative.verification_code)}
+                >
+                  {creative.verification_code ? 'Change code' : 'Set code'}
+                </button>
+              </div>
+            )}
+            {isManager && task.proof_images.length > 0 && (
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={verdictBusy || creative.verification_status === 'VERIFIED'}
+                  onClick={() => void onCreativeVerdict('VERIFIED')}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="btn danger"
+                  disabled={verdictBusy || creative.verification_status === 'FAILED'}
+                  onClick={() => void onCreativeVerdict('FAILED')}
+                >
+                  Reject
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       <div className="grid-2">
         {!canCapture && (
           <section className="panel stack">
@@ -593,32 +804,80 @@ export function TaskDetailPage() {
         <section className="panel stack">
           {canCapture && (
             <div className="capture-box stack">
+              {creative && !photosDone && (
+                <p className="muted small">
+                  Put up one of the campaign's creatives, then take a photo of it with the code at the
+                  bottom clearly visible.
+                </p>
+              )}
+              {creativeRetake && (
+                <p className="error">
+                  Photo rejected
+                  {creative?.verification_notes ? `: ${creative.verification_notes}` : ''}. Retake the photo.
+                </p>
+              )}
               <h3>Capture sequence</h3>
-              <p className={`geo-status ${geoReady ? 'ok' : 'warn'}`}>
-                {geoReady
-                  ? 'GPS ready'
-                  : geoError || 'Getting GPS fix…'}
-              </p>
+              {!creative && (
+                <p className={`geo-status ${geoReady ? 'ok' : 'warn'}`}>
+                  {geoReady
+                    ? 'GPS ready'
+                    : geoError || 'Getting GPS fix…'}
+                </p>
+              )}
               <ol className="slot-steps">
                 {slots.map((s) => (
                   <li
                     key={s}
-                    className={uploadedSlots.has(s) ? 'done' : s === captureSlot ? 'current' : ''}
+                    className={
+                      creativeRetake && s === captureSlot
+                        ? 'current'
+                        : uploadedSlots.has(s)
+                          ? 'done'
+                          : s === captureSlot
+                            ? 'current'
+                            : ''
+                    }
                   >
                     <strong>{slotLabel(s)}</strong>
-                    <span>{uploadedSlots.has(s) ? 'Done' : s === captureSlot ? 'Next' : 'Waiting'}</span>
+                    <span>
+                      {creativeRetake && s === captureSlot
+                        ? 'Retake'
+                        : uploadedSlots.has(s)
+                          ? 'Done'
+                          : s === captureSlot
+                            ? 'Next'
+                            : 'Waiting'}
+                    </span>
                   </li>
                 ))}
               </ol>
 
-              {!photosDone && captureSlot && !cameraOpen && (
+              {creativeDraft && (
+                <div className="creative-draft stack">
+                  <img src={creativeDraft.url} alt="Your photo" />
+                  <div className="actions">
+                    <button type="button" className="btn ghost" onClick={onRetakeCreative}>
+                      Retake
+                    </button>
+                    <button type="button" className="btn primary" onClick={onSubmitCreative}>
+                      Submit task
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!photosDone && captureSlot && !cameraOpen && !creativeDraft && (
                 <button
                   type="button"
                   className="btn primary capture-btn"
                   disabled={openingCamera}
                   onClick={() => void openCamera(captureSlot)}
                 >
-                  {openingCamera ? 'Opening camera…' : `Capture ${slotLabel(captureSlot)}`}
+                  {openingCamera
+                    ? 'Opening camera…'
+                    : creativeRetake
+                      ? 'Retake photo'
+                      : `Capture ${slotLabel(captureSlot)}`}
                 </button>
               )}
 
@@ -679,8 +938,19 @@ export function TaskDetailPage() {
                 </form>
               )}
 
-              {photosDone && (!detailForm || detailsDone) && (
+              {creative && creativeUploading && <p className="muted">Submitting…</p>}
+
+              {photosDone && !creative && (!detailForm || detailsDone) && (
                 <p className="success">Task complete.</p>
+              )}
+
+              {photosDone && creative && !creativeUploading && (
+                <>
+                  <p className="success">Task submitted.</p>
+                  <Link to={`/my/campaigns/${task.campaign_id}`} className="btn ghost">
+                    Back to tasks
+                  </Link>
+                </>
               )}
             </div>
           )}
@@ -743,12 +1013,12 @@ export function TaskDetailPage() {
               </div>
             </div>
           )}
-          {canCapture && uploadedSlots.size > 0 && (
+          {canCapture && uploadedSlots.size > 0 && !executorProofsLocked && (
             <p className="muted small">Tap a photo to retake or delete.</p>
           )}
           <ProofThumbGrid
             images={task.proof_images}
-            interactive={canManageProofs || isSupervisor}
+            interactive={(canManageProofs && !executorProofsLocked) || isSupervisor}
             onSelect={setPreviewSlot}
             fallbackLatitude={task.latitude}
             fallbackLongitude={task.longitude}

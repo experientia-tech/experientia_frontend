@@ -6,6 +6,7 @@ export type ServiceType =
   | 'No Parking Boards'
   | 'Pole Boards'
   | 'Shop Branding'
+  | 'Creative'
   | 'Other'
 
 export interface User {
@@ -54,6 +55,87 @@ export interface ExecutorCampaign {
   pending_count: number
 }
 
+export type CreativeGenerationStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+
+export type CreativeVerificationStatus =
+  | 'NOT_SUBMITTED'
+  | 'PENDING_VERIFICATION'
+  | 'VERIFIED'
+  | 'FAILED'
+  | 'NEEDS_REVIEW'
+
+export type CreativeDetectionMethod = 'QR' | 'OCR' | 'MANUAL'
+
+export interface CreativeTask {
+  /** Null if generation failed; a manager can set it from the task page */
+  verification_code: string | null
+  /** Null until the background job has rendered it */
+  generated_image_url?: string | null
+  verification_status: CreativeVerificationStatus
+  detected_code?: string | null
+  detection_method?: CreativeDetectionMethod | null
+  /** Reason shown to executor / manager */
+  verification_notes?: string | null
+  /** The automatic check found no task's code in the proof photo */
+  code_missing?: boolean
+  proof_uploaded_at?: string | null
+  verified_at?: string | null
+}
+
+export interface CreativeCampaign {
+  source_image_url: string
+  generation_status: CreativeGenerationStatus
+  generated_count: number
+  generation_error?: string | null
+  /** One page per task, rebuilt after each generation run */
+  print_pdf_ready?: boolean
+  print_pdf_pages?: number | null
+  print_pdf_generated_at?: string | null
+}
+
+export interface CreativeReportTotals {
+  total_tasks: number
+  not_submitted: number
+  pending_verification: number
+  verified: number
+  failed: number
+  needs_review: number
+  /** verified ÷ submitted, percent, 1 decimal */
+  success_rate: number
+}
+
+export interface CreativeReportItem {
+  task_id: string
+  sequence_number: number
+  executor_user_id: string
+  executor_name?: string | null
+  verification_code: string | null
+  verification_status: CreativeVerificationStatus
+  detected_code?: string | null
+  detection_method?: CreativeDetectionMethod | null
+  ocr_confidence?: number | null
+  generated_image_url?: string | null
+  proof_image_url?: string | null
+  proof_uploaded_at?: string | null
+  verified_at?: string | null
+  verification_attempts: number
+  verification_notes?: string | null
+  code_missing?: boolean
+}
+
+export interface CreativeReport {
+  campaign_id: string
+  campaign_name: string
+  generation: CreativeCampaign
+  totals: CreativeReportTotals
+  items: CreativeReportItem[]
+  page: number
+  page_size: number
+  items_total: number
+  /** e.g. "every hour"; null when only "Verify now" checks proofs */
+  verify_schedule?: string | null
+}
+
 export interface Task {
   id: string
   campaign_id: string
@@ -81,6 +163,7 @@ export interface Task {
   flagged: boolean
   created_at: string
   completed_at?: string | null
+  creative?: CreativeTask | null
 }
 
 export interface Member {
@@ -127,6 +210,7 @@ export interface Campaign extends CampaignListItem {
   tasks_page: number
   tasks_page_size: number
   tasks_total: number
+  creative?: CreativeCampaign | null
 }
 
 export const SERVICE_TYPES: ServiceType[] = [
@@ -135,6 +219,7 @@ export const SERVICE_TYPES: ServiceType[] = [
   'No Parking Boards',
   'Pole Boards',
   'Shop Branding',
+  'Creative',
   'Other',
 ]
 
@@ -144,6 +229,7 @@ export const PHOTOS_REQUIRED: Record<ServiceType, number> = {
   'No Parking Boards': 1,
   'Pole Boards': 1,
   'Shop Branding': 1,
+  Creative: 1,
   Other: 3,
 }
 
@@ -153,6 +239,7 @@ export const CAPTURE_SLOTS: Record<ServiceType, string[]> = {
   'No Parking Boards': ['photo_1'],
   'Pole Boards': ['photo_1'],
   'Shop Branding': ['photo_1'],
+  Creative: ['photo_1'],
   Other: ['photo_1', 'photo_2', 'photo_3'],
 }
 
@@ -171,6 +258,7 @@ export const DETAIL_FORM: Record<ServiceType, 'driver' | 'gym' | null> = {
   'No Parking Boards': null,
   'Pole Boards': null,
   'Shop Branding': null,
+  Creative: null,
   Other: null,
 }
 
@@ -180,6 +268,31 @@ export const STATUS_LABELS: Record<string, string> = {
   ACCEPTED: 'COMPLETED',
   REJECTED: 'REJECTED',
   DRAFT: 'DRAFT',
+}
+
+export const CREATIVE_STATUS_LABELS: Record<CreativeVerificationStatus, string> = {
+  NOT_SUBMITTED: 'Not submitted',
+  PENDING_VERIFICATION: 'Awaiting check',
+  VERIFIED: 'Verified',
+  FAILED: 'Failed',
+  NEEDS_REVIEW: 'Needs review',
+}
+
+/** "QR", "OCR · 82%" or "MANUAL"; null when nothing was detected yet. */
+export function creativeDetectionLabel(item: {
+  detection_method?: CreativeDetectionMethod | null
+  ocr_confidence?: number | null
+}) {
+  if (!item.detection_method) return null
+  if (item.detection_method === 'OCR' && item.ocr_confidence != null) {
+    return `OCR · ${Math.round(item.ocr_confidence)}%`
+  }
+  return item.detection_method
+}
+
+/** `pill` modifier class for a creative verification status. */
+export function creativeStatusPill(status: CreativeVerificationStatus) {
+  return `pill creative-${status.toLowerCase().replace(/_/g, '-')}`
 }
 
 export function taskLabel(task: Pick<Task, 'sequence_number' | 'id'>) {
@@ -194,8 +307,16 @@ export function taskProofCount(task: Pick<Task, 'proof_image_count' | 'proof_ima
 
 /** Executors may open tasks that still need photos or pending detail forms. */
 export function canExecutorOpenTask(
-  task: Pick<Task, 'proof_image_count' | 'proof_images' | 'required_photos' | 'detail_form' | 'details_complete'>
+  task: Pick<
+    Task,
+    'proof_image_count' | 'proof_images' | 'required_photos' | 'detail_form' | 'details_complete' | 'creative'
+  >
 ) {
+  // Creative: must match the backend's EXECUTOR_OPEN set — photo count doesn't decide it.
+  if (task.creative) {
+    const s = task.creative.verification_status
+    return s === 'NOT_SUBMITTED' || s === 'FAILED'
+  }
   const needed = task.required_photos || 1
   if (taskProofCount(task) < needed) return true
   if (task.detail_form && !task.details_complete) return true

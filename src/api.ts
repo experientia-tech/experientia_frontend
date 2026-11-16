@@ -448,10 +448,19 @@ export async function downloadCreativePrintPdf(campaignId: string, filename: str
   feedbackStartLoading()
   try {
     const token = localStorage.getItem('token')
-    const res = await fetch(`${API_PREFIX}/campaigns/${campaignId}/creative-print.pdf`, {
+    // Print PDFs can be far larger than a Lambda response allows: ask for an S3 link.
+    const res = await fetch(`${API_PREFIX}/campaigns/${campaignId}/creative-print.pdf?link=1`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!res.ok) throw new Error('Download failed')
+    if (res.headers.get('content-type')?.includes('application/json')) {
+      const { url: s3Url } = (await res.json()) as { url: string; filename: string }
+      const link = document.createElement('a')
+      link.href = s3Url
+      link.rel = 'noopener'
+      link.click()
+      return
+    }
     const url = URL.createObjectURL(await res.blob())
     const a = document.createElement('a')
     a.href = url
@@ -474,10 +483,21 @@ export async function downloadCampaignExport(campaignId: string, jobId: string, 
   feedbackStartLoading()
   try {
     const token = localStorage.getItem('token')
-    const res = await fetch(`${API_PREFIX}/campaigns/${campaignId}/export/jobs/${jobId}/download`, {
+    const endpoint = `${API_PREFIX}/campaigns/${campaignId}/export/jobs/${jobId}/download`
+    // Ask for a short-lived S3 link first: the API runs on Lambda, which can't return
+    // large files. Older backends ignore ?link=1 and send the file itself.
+    const res = await fetch(`${endpoint}?link=1`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (!res.ok) throw new Error('Download failed')
+    if (res.headers.get('content-type')?.includes('application/json')) {
+      const { url: s3Url } = (await res.json()) as { url: string; filename: string }
+      const link = document.createElement('a')
+      link.href = s3Url // S3 sends Content-Disposition: attachment with the filename
+      link.rel = 'noopener'
+      link.click()
+      return
+    }
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
